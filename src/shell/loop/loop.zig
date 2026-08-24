@@ -143,8 +143,13 @@ pub const Loop = struct {
     /// has no business knowing about. `drainInto` stays for callers that only
     /// want the events.
     fn drainQueue(self: *Loop) usize {
+        // The buffer a popped payload's bytes are copied into (`DR-010`). One
+        // slot's worth, reused across the drain: each payload is published and
+        // forgotten before the next `pop` overwrites it, which is exactly the
+        // lifetime the bus documents for a borrowed slice.
+        var out: [queue_mod.max_payload_bytes]u8 = undefined;
         var delivered: usize = 0;
-        while (self.queue.pop(self.io)) |payload| {
+        while (self.queue.pop(self.io, &out)) |payload| {
             switch (urgency(payload.event())) {
                 .urgent => self.scheduler.markUrgent(),
                 .normal => self.scheduler.markDirty(),

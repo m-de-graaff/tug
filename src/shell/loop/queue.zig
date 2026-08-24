@@ -13,6 +13,14 @@
 //!
 //! A producer pushes and then rings the `Waker`; the loop wakes, drains, and
 //! publishes.
+//!
+//! **A slot owns the bytes its payload points at** (`DR-010`). `Payload`
+//! documents its slices as borrowed, which is right on the loop thread — the
+//! renderer copies on `feed`, so nobody else needs to own anything. It stops
+//! being right the moment the producer is a different thread: its buffer is
+//! reused for the next chunk long before the loop drains. So `push` copies in
+//! and `pop` copies out, which costs two memcpys of at most 512 bytes and
+//! removes the lifetime question entirely.
 
 const std = @import("std");
 
@@ -20,40 +28,95 @@ const core = @import("tugcore");
 const proto = @import("tugproto");
 
 /// One turn of the loop drains the whole queue, so this only has to absorb what
-/// arrives between two wakeups. A producer outrunning that is the firehose case
-/// Phase 5 exists to test.
+/// arrives between two wakeups. A producer outrunning that gets `error.Full`
+/// and waits, which is the backpressure that keeps a firehose from growing
+/// memory without bound.
 pub const capacity = 64;
+
+/// The largest text a single queued payload may carry. Chosen against the
+/// producer rather than the consumer: the cadence engine's largest ordinary
+/// chunk is 64 bytes, and a fault that produces more splits across slots on the
+/// way in. 64 slots at this size is 32 KiB of static footprint, against a
+/// 10 MiB RSS budget.
+pub const max_payload_bytes: usize = 512;
+
+const Slot = struct {
+    payload: proto.Payload,
+    bytes: [max_payload_bytes]u8,
+    len: usize,
+};
+
+/// The borrowed slice a payload carries, or an empty one.
+///
+/// Exactly three arms of the catalog carry bytes. The switch is deliberately
+/// exhaustive rather than an `else`: a fourth added later would be silently
+/// dropped here, and the compiler refusing to build is how that gets noticed.
+fn payloadBytes(payload: proto.Payload) []const u8 {
+    return switch (payload) {
+        .input_submit => |p| p.text,
+        .stream_delta => |p| p.text,
+        .err => |p| p.message,
+        .session_start, .request_start, .stream_end => "",
+        .tool_request, .tool_decision, .tool_result => "",
+        .turn_end, .shutdown => "",
+    };
+}
+
+/// The same payload with its slice repointed at `bytes`.
+fn withBytes(payload: proto.Payload, bytes: []const u8) proto.Payload {
+    return switch (payload) {
+        .input_submit => .{ .input_submit = .{ .text = bytes } },
+        .stream_delta => .{ .stream_delta = .{ .text = bytes } },
+        .err => .{ .err = .{ .message = bytes } },
+        else => payload,
+    };
+}
 
 pub const Queue = struct {
     /// Uncancelable throughout. A producer handing over an event it has already
     /// produced must not fail because something elsewhere was cancelled, and the
-    /// critical sections here are three array writes long.
+    /// critical sections here are one memcpy long.
     mutex: std.Io.Mutex = .init,
-    items: [capacity]proto.Payload = undefined,
+    items: [capacity]Slot = undefined,
     head: usize = 0,
     len: usize = 0,
 
-    /// ponytail: payload slices are borrowed, and a queued payload outlives the
-    /// stack frame that made it. Nothing crosses a thread boundary carrying
-    /// bytes in Phase 3 — the only cross-thread signal is a resize, which has no
-    /// payload — so ownership is deferred rather than solved. Phase 5's mock
-    /// provider is the first real producer and is where it gets decided: either
-    /// an arena drained alongside the queue, or a byte pool behind it.
-    pub fn push(self: *Queue, io: std.Io, payload: proto.Payload) error{Full}!void {
+    /// Copies `payload` and its bytes into a slot.
+    ///
+    /// A payload larger than a slot is refused rather than truncated. Splitting
+    /// it is the producer's job, and it is free: a text delta cut in two is two
+    /// text deltas, which is what the whole streaming path is made of anyway.
+    pub fn push(self: *Queue, io: std.Io, payload: proto.Payload) error{ Full, PayloadTooLarge }!void {
+        const bytes = payloadBytes(payload);
+        if (bytes.len > max_payload_bytes) return error.PayloadTooLarge;
+
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         if (self.len == capacity) return error.Full;
-        self.items[(self.head + self.len) % capacity] = payload;
+        const slot = &self.items[(self.head + self.len) % capacity];
+        @memcpy(slot.bytes[0..bytes.len], bytes);
+        slot.len = bytes.len;
+        slot.payload = payload;
         self.len += 1;
     }
 
-    pub fn pop(self: *Queue, io: std.Io) ?proto.Payload {
+    /// Copies the oldest payload into `out` and returns it pointing there.
+    ///
+    /// Returning a slice into the ring instead would be a use-after-free with
+    /// extra steps: the slot is available to a producer the instant this
+    /// returns, and a firehose refills it well before the caller has published.
+    /// `out` must outlive the returned payload — the loop's lives in
+    /// `drainQueue`, which is exactly the publish-and-forget lifetime the bus
+    /// documents.
+    pub fn pop(self: *Queue, io: std.Io, out: *[max_payload_bytes]u8) ?proto.Payload {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         if (self.len == 0) return null;
-        const payload = self.items[self.head];
+        const slot = &self.items[self.head];
+        @memcpy(out[0..slot.len], slot.bytes[0..slot.len]);
+        const payload = withBytes(slot.payload, out[0..slot.len]);
         self.head = (self.head + 1) % capacity;
         self.len -= 1;
         return payload;
@@ -67,8 +130,9 @@ pub const Queue = struct {
     /// empty rather than taking a count up front also collects anything a
     /// producer added mid-drain.
     pub fn drainInto(self: *Queue, io: std.Io, bus: *core.Bus) usize {
+        var out: [max_payload_bytes]u8 = undefined;
         var delivered: usize = 0;
-        while (self.pop(io)) |payload| {
+        while (self.pop(io, &out)) |payload| {
             bus.publish(payload);
             delivered += 1;
         }
@@ -95,10 +159,11 @@ test "a queue drains in the order it was filled" {
     try queue.push(io, .stream_end);
     try queue.push(io, .shutdown);
 
-    try testing.expectEqual(proto.Event.session_start, queue.pop(io).?.event());
-    try testing.expectEqual(proto.Event.stream_end, queue.pop(io).?.event());
-    try testing.expectEqual(proto.Event.shutdown, queue.pop(io).?.event());
-    try testing.expect(queue.pop(io) == null);
+    var out: [max_payload_bytes]u8 = undefined;
+    try testing.expectEqual(proto.Event.session_start, queue.pop(io, &out).?.event());
+    try testing.expectEqual(proto.Event.stream_end, queue.pop(io, &out).?.event());
+    try testing.expectEqual(proto.Event.shutdown, queue.pop(io, &out).?.event());
+    try testing.expect(queue.pop(io, &out) == null);
 }
 
 test "the ring wraps rather than growing" {
@@ -110,17 +175,79 @@ test "the ring wraps rather than growing" {
     try testing.expectError(error.Full, queue.push(io, .session_start));
 
     // Drain half, refill half: the indices have to wrap without losing order.
-    for (0..capacity / 2) |_| _ = queue.pop(io);
+    var out: [max_payload_bytes]u8 = undefined;
+    for (0..capacity / 2) |_| _ = queue.pop(io, &out);
     for (0..capacity / 2) |_| try queue.push(io, .shutdown);
 
     // The remaining originals come out first, then the new ones.
     for (0..capacity / 2) |_| {
-        try testing.expectEqual(proto.Event.session_start, queue.pop(io).?.event());
+        try testing.expectEqual(proto.Event.session_start, queue.pop(io, &out).?.event());
     }
     for (0..capacity / 2) |_| {
-        try testing.expectEqual(proto.Event.shutdown, queue.pop(io).?.event());
+        try testing.expectEqual(proto.Event.shutdown, queue.pop(io, &out).?.event());
     }
-    try testing.expect(queue.pop(io) == null);
+    try testing.expect(queue.pop(io, &out) == null);
+}
+
+test "a payload's bytes survive the frame that pushed them" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+
+    var queue: Queue = .{};
+
+    // The bug this exists to prevent: a producer builds a delta in a local
+    // buffer, pushes it, and the buffer is reused for the next chunk long
+    // before the loop publishes.
+    {
+        var scratch: [15]u8 = "hello, tugboat!".*;
+        try queue.push(io, .{ .stream_delta = .{ .text = &scratch } });
+        @memset(&scratch, 'X');
+    }
+
+    var out: [max_payload_bytes]u8 = undefined;
+    const popped = queue.pop(io, &out).?;
+    try testing.expectEqualStrings("hello, tugboat!", popped.stream_delta.text);
+}
+
+test "a slot is not reused under a payload already popped" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+
+    var queue: Queue = .{};
+    try queue.push(io, .{ .stream_delta = .{ .text = "first" } });
+
+    var out: [max_payload_bytes]u8 = undefined;
+    const popped = queue.pop(io, &out).?;
+
+    // The producer refills the very slot that was just freed. `popped` must not
+    // change under it, which is only true because `pop` copied out.
+    for (0..capacity) |_| try queue.push(io, .{ .stream_delta = .{ .text = "later" } });
+    try testing.expectEqualStrings("first", popped.stream_delta.text);
+}
+
+test "an oversized payload is refused rather than truncated" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+
+    var queue: Queue = .{};
+    const huge = "x" ** (max_payload_bytes + 1);
+    try testing.expectError(
+        error.PayloadTooLarge,
+        queue.push(io, .{ .stream_delta = .{ .text = huge } }),
+    );
+}
+
+test "payloads with no bytes still round-trip" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+
+    var queue: Queue = .{};
+    try queue.push(io, .session_start);
+    try queue.push(io, .{ .err = .{ .message = "boom" } });
+
+    var out: [max_payload_bytes]u8 = undefined;
+    try testing.expectEqual(proto.Event.session_start, queue.pop(io, &out).?.event());
+    try testing.expectEqualStrings("boom", queue.pop(io, &out).?.err.message);
 }
 
 const Recorder = struct {
@@ -166,7 +293,8 @@ test "pushes from other threads all arrive" {
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Producer.run, .{ &queue, io });
     for (threads) |thread| thread.join();
 
+    var out: [max_payload_bytes]u8 = undefined;
     var drained: usize = 0;
-    while (queue.pop(io)) |_| drained += 1;
+    while (queue.pop(io, &out)) |_| drained += 1;
     try testing.expectEqual(@as(usize, 64), drained);
 }
