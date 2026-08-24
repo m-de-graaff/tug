@@ -64,12 +64,54 @@ extern "kernel32" fn GetConsoleMode(handle: windows.HANDLE, mode: *windows.DWORD
 extern "kernel32" fn SetConsoleMode(handle: windows.HANDLE, mode: windows.DWORD) callconv(.winapi) c_int;
 extern "kernel32" fn GetConsoleScreenBufferInfo(handle: windows.HANDLE, info: *CONSOLE_SCREEN_BUFFER_INFO) callconv(.winapi) c_int;
 extern "kernel32" fn SetConsoleCtrlHandler(handler: ?HandlerRoutine, add: c_int) callconv(.winapi) c_int;
+extern "kernel32" fn GetConsoleOutputCP() callconv(.winapi) windows.UINT;
+extern "kernel32" fn GetConsoleCP() callconv(.winapi) windows.UINT;
+extern "kernel32" fn SetConsoleOutputCP(code_page: windows.UINT) callconv(.winapi) c_int;
+extern "kernel32" fn SetConsoleCP(code_page: windows.UINT) callconv(.winapi) c_int;
+
+const CP_UTF8: windows.UINT = 65001;
 
 var saved_input_mode: windows.DWORD = 0;
 var saved_output_mode: windows.DWORD = 0;
 var saved_input_handle: ?windows.HANDLE = null;
 var saved_output_handle: ?windows.HANDLE = null;
 var saved_valid: std.atomic.Value(bool) = .init(false);
+
+var saved_output_cp: windows.UINT = 0;
+var saved_input_cp: windows.UINT = 0;
+var saved_cp_valid: std.atomic.Value(bool) = .init(false);
+
+/// Tells the console that tug's bytes are UTF-8.
+///
+/// Without this the console decodes output with the machine's OEM code page —
+/// 850 on a Dutch install — and every non-ASCII byte tug writes comes out as
+/// mojibake: the em dash in the usage text arrives as `ΓÇö`. The input code
+/// page matters for the same reason in reverse, since a typed non-ASCII
+/// character reaches the decoder as raw bytes.
+///
+/// Called before anything is written rather than from `enterRaw`, because
+/// `--help` and `--version` print without ever opening the terminal.
+pub fn useUtf8() void {
+    const output_cp = GetConsoleOutputCP();
+    const input_cp = GetConsoleCP();
+    if (output_cp == 0 or input_cp == 0) return;
+
+    saved_output_cp = output_cp;
+    saved_input_cp = input_cp;
+    saved_cp_valid.store(true, .release);
+
+    _ = SetConsoleOutputCP(CP_UTF8);
+    _ = SetConsoleCP(CP_UTF8);
+}
+
+/// Puts the code pages back. A code page outlives the process that changed it,
+/// so leaving 65001 behind would change how every later command in that console
+/// window decodes its own output. Idempotent, for the same reasons `restore` is.
+pub fn restoreUtf8() void {
+    if (!saved_cp_valid.swap(false, .acq_rel)) return;
+    _ = SetConsoleOutputCP(saved_output_cp);
+    _ = SetConsoleCP(saved_input_cp);
+}
 
 pub const Impl = struct {
     input: windows.HANDLE,
@@ -163,6 +205,10 @@ pub fn open() (error{NotATerminal} || OpenError)!Impl {
 }
 
 pub fn restoreGlobal() void {
+    // Unconditional: the code page is set before raw mode is ever entered, so a
+    // panic on the `--help` path has one to put back and no console mode to.
+    restoreUtf8();
+
     if (!saved_valid.swap(false, .acq_rel)) return;
 
     if (saved_input_handle) |handle| _ = SetConsoleMode(handle, saved_input_mode);
@@ -179,6 +225,7 @@ fn onConsoleCtrl(control_type: windows.DWORD) callconv(.winapi) c_int {
 }
 
 test "restore is idempotent when nothing was saved" {
+    saved_cp_valid.store(false, .release);
     saved_valid.store(false, .release);
     restoreGlobal();
     restoreGlobal();

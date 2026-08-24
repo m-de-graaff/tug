@@ -22,6 +22,9 @@ pub const decoder = @import("input/decoder.zig");
 pub const waiting = @import("loop/wait.zig");
 pub const queue = @import("loop/queue.zig");
 pub const loop = @import("loop/loop.zig");
+pub const width = @import("render/width.zig");
+pub const markdown = @import("render/markdown.zig");
+pub const renderer = @import("render/renderer.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;
@@ -36,7 +39,12 @@ pub const Decoder = decoder.Decoder;
 pub const Waker = waiting.Waker;
 pub const Queue = queue.Queue;
 pub const Loop = loop.Loop;
+pub const Renderer = renderer.Renderer;
+pub const BlockKind = renderer.BlockKind;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("render/counting_writer.zig");
+    _ = @import("render/golden.zig");
+    _ = @import("render/rows_test.zig");
 }

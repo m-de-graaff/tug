@@ -1,0 +1,7 @@
+\e[1mTitle\e[0m\r
+\r
+• alpha bravo charlie\r
+• two\r
+\r
+1. first\r
+2. second\r

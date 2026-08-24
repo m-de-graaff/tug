@@ -1,0 +1,7 @@
+The quick brown\r
+\e[2m... streaming\e[0m\r
+\r\e[2F\e[0JThe quick brown fox\r
+jumps over the lazy dog.\r
+\e[2m... streaming\e[0m\r
+\r\e[3F\e[0JThe quick brown fox\r
+jumps over the lazy dog.\r

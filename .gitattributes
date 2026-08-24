@@ -9,3 +9,7 @@
 # every CRLF file as needing reformatting, which buries a real formatting
 # problem in a list of every file in the repo.
 *.zig text eol=lf
+
+# Golden transcripts are compared byte for byte against what the renderer
+# emitted, so a CRLF checkout would fail every one of them on Windows.
+testdata/golden/*.txt text eol=lf
