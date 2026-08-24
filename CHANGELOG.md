@@ -95,14 +95,24 @@ like, and a property test over 400 randomized scripts pins down the arithmetic
 under them. `tug --debug-render` streams a hardcoded burst through the whole
 thing at about a thousand deltas a second.
 
-Two of this phase's own tests found bugs worth naming. Control bytes in a text
-delta used to reach the terminal, which makes a raw `ESC` from a provider an
-escape-sequence injection — the same attack paste content is already stripped
-of. And a line that outgrew the screen before its newline arrived could not be
-committed, leaving a tail the cursor-up could no longer reach the top of.
+Two of this phase's own tests found bugs worth naming. Control characters in a
+text delta used to reach the terminal, which makes a stray `ESC` — or U+009B,
+its eight-bit form — an escape-sequence injection from whatever the provider
+sent, the same attack paste content is already stripped of. And a line that
+outgrew the screen before its newline arrived could not be committed, leaving a
+tail the cursor-up could no longer reach the top of.
 
-Cost: 13,280 bytes, taking the binary to 131,992 of the 500 KiB budget. Tests
-go from 76 to 134.
+A review pass over the finished branch found eight more, two of them in the row
+count itself. A resize made the count a lie in both directions — the terminal
+re-wraps the hard lines already on screen, so moving back over the recorded
+number either strands rows or erases committed scrollback — and the fix is to
+abandon the old tail rather than guess: it becomes scrollback, and the new tail
+is drawn below it. The status hint was written unwrapped and counted as one row,
+so any terminal narrower than it orphaned a fragment per frame; it is now cut to
+what fits.
+
+Cost: 13,848 bytes, taking the binary to 132,560 of the 500 KiB budget. Tests
+go from 76 to 140.
 
 ### Not yet
 
