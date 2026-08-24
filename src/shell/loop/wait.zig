@@ -44,6 +44,16 @@ pub fn wait(input: Handle, wake: ?Handle, timeout_ms: ?u32) Error!Ready {
         waitPosix(input, wake, timeout_ms);
 }
 
+/// Milliseconds on a monotonic clock, for deadlines.
+///
+/// `.awake` rather than `.real`: a deadline computed against a wall clock is
+/// wrong every time NTP steps the system time, and "wrong" here means either a
+/// frame that never paints or a probe that gives up before it asked.
+pub fn nowMs(io: std.Io) u64 {
+    const milliseconds = std.Io.Timestamp.now(io, .awake).toMilliseconds();
+    return @intCast(@max(0, milliseconds));
+}
+
 /// The loop's doorbell.
 ///
 /// `wake` is async-signal-safe and may be called from any thread. Everything

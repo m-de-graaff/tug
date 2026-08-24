@@ -173,9 +173,11 @@ fn printCapabilities(
 
 /// Asks the terminal what it supports, and takes silence for an answer.
 ///
-/// ponytail: both probes share one read window rather than one each, so a
-/// terminal that answers the first and not the second costs one timeout rather
-/// than two. Split them if a terminal ever turns up that reorders replies.
+/// Every read is gated on `wait`, because a terminal that supports neither
+/// protocol answers neither query and the descriptor is in raw mode with
+/// `VMIN=1`: a read that is not gated never returns. The whole budget is spent
+/// once rather than once per query, so a terminal that answers the first and
+/// not the second costs one timeout rather than two.
 fn probeCapabilities(io: std.Io, terminal: *shell.Backend) shell.caps.Probe {
     var write_buffer: [64]u8 = undefined;
     var terminal_writer = terminal.writer(io, &write_buffer);
@@ -188,15 +190,50 @@ fn probeCapabilities(io: std.Io, terminal: *shell.Backend) shell.caps.Probe {
     var read_buffer: [256]u8 = undefined;
     var terminal_reader = terminal.reader(io, &read_buffer);
 
-    // A terminal that supports neither replies to neither, so this read is
-    // expected to come back empty and must not be allowed to block.
-    const reply = terminal_reader.interface.peekGreedy(1) catch return .{};
+    var reply_buffer: [256]u8 = undefined;
+    var reply_len: usize = 0;
+    const deadline = shell.waiting.nowMs(io) + shell.modes.probe_timeout_ms;
 
+    while (reply_len < reply_buffer.len) {
+        const now = shell.waiting.nowMs(io);
+        if (now >= deadline) break;
+
+        const remaining: u32 = @intCast(deadline - now);
+        const ready = shell.waiting.wait(terminal.handle(), null, remaining) catch break;
+        if (!ready.input) break;
+
+        const chunk = terminal_reader.interface.peekGreedy(1) catch break;
+        if (chunk.len == 0) break;
+
+        const take = @min(chunk.len, reply_buffer.len - reply_len);
+        @memcpy(reply_buffer[reply_len..][0..take], chunk[0..take]);
+        reply_len += take;
+        terminal_reader.interface.toss(chunk.len);
+
+        if (probeRepliesComplete(reply_buffer[0..reply_len])) break;
+    }
+
+    const reply = reply_buffer[0..reply_len];
     return .{
         .kitty_keyboard = std.mem.indexOf(u8, reply, "\x1b[?") != null and
             shell.modes.kittyReplyMeansSupported(firstReply(reply)),
         .synchronized_output = std.mem.indexOf(u8, reply, "2026;") != null,
     };
+}
+
+/// True once both replies are present, so a terminal that answers promptly
+/// costs a round trip rather than the whole 50 ms budget.
+///
+/// The kitty reply is `CSI ? <flags> u` and the synchronized-output reply is
+/// `CSI ? 2026 ; <state> $y`, so `CSI ?` identifies neither of them on its own
+/// — the `u` terminator and the mode number are what tell them apart.
+///
+/// This is only an early exit. Getting it wrong costs the rest of the 50 ms
+/// budget; it can never produce a wrong verdict, because the verdict is read
+/// from the accumulated bytes either way.
+fn probeRepliesComplete(reply: []const u8) bool {
+    return std.mem.indexOf(u8, reply, "2026;") != null and
+        std.mem.indexOfScalar(u8, reply, 'u') != null;
 }
 
 /// The terminal may answer both probes in one read, so split at the second CSI.
@@ -303,6 +340,18 @@ test "commands are recognized and the default is the shell" {
     for (cases) |case| {
         try testing.expectEqual(case.want, parseCommand(case.args));
     }
+}
+
+test "the probe stops early only once both replies have arrived" {
+    try testing.expect(!probeRepliesComplete(""));
+    try testing.expect(!probeRepliesComplete("\x1b[?3u"));
+
+    // The synchronized-output reply on its own also starts `CSI ?`, so a
+    // marker that only looked for that would call this pair complete.
+    try testing.expect(!probeRepliesComplete("\x1b[?2026;2$y"));
+
+    try testing.expect(probeRepliesComplete("\x1b[?3u\x1b[?2026;2$y"));
+    try testing.expect(probeRepliesComplete("\x1b[?2026;2$y\x1b[?3u"));
 }
 
 test "splitting a combined probe reply keeps the first response" {
