@@ -30,6 +30,7 @@ pub const width = @import("render/width.zig");
 pub const markdown = @import("render/markdown.zig");
 pub const prompt = @import("render/prompt.zig");
 pub const renderer = @import("render/renderer.zig");
+pub const repl = @import("repl.zig");
 pub const cadence = @import("provider/cadence.zig");
 pub const runner = @import("provider/runner.zig");
 
@@ -51,6 +52,7 @@ pub const Editor = editor.Editor;
 pub const History = history.History;
 pub const Prompt = prompt.Prompt;
 pub const Renderer = renderer.Renderer;
+pub const Session = repl.Session;
 pub const BlockKind = renderer.BlockKind;
 pub const Cadence = cadence.Cadence;
 pub const Runner = runner.Runner;

@@ -166,6 +166,22 @@ pub fn applyEdit(editor: *Editor, action: Action) std.mem.Allocator.Error!Outcom
     return .handled;
 }
 
+/// The character an *unbound* chord types, if it types one.
+///
+/// Lives here rather than in the session because it is the same kind of
+/// decision as the binding table: what a keypress means. A chord carrying ctrl,
+/// alt or super and no binding is a command tug does not have, and inserting
+/// its letter would be worse than ignoring it — `ctrl+p` in a shell that has
+/// not bound it should do nothing, not type a `p`. Shift is not in that list
+/// because shift is how capitals are typed.
+pub fn literalCodepoint(event: KeyEvent) ?u21 {
+    if (event.mods.ctrl or event.mods.alt or event.mods.super) return null;
+    return switch (event.key) {
+        .char => |codepoint| codepoint,
+        else => null,
+    };
+}
+
 /// One line per action, for `--help` now and `/keys` in Phase 10.
 pub fn help(action: Action) []const u8 {
     return switch (action) {
@@ -238,6 +254,30 @@ test "the emacs set is bound exactly as the spec lists it" {
         try testing.expectEqual(case.action, defaultAction(case.event, true).?);
         try testing.expectEqual(case.action, defaultAction(case.event, false).?);
     }
+}
+
+test "an unbound chord types its character only when it carries no command modifier" {
+    try testing.expectEqual(@as(?u21, 'a'), literalCodepoint(.{ .key = .{ .char = 'a' } }));
+    // Shift is how a capital is typed, so it is not a command modifier.
+    try testing.expectEqual(
+        @as(?u21, 'A'),
+        literalCodepoint(.{ .key = .{ .char = 'A' }, .mods = .{ .shift = true } }),
+    );
+    try testing.expectEqual(
+        @as(?u21, null),
+        literalCodepoint(.{ .key = .{ .char = 'p' }, .mods = .{ .ctrl = true } }),
+    );
+    try testing.expectEqual(
+        @as(?u21, null),
+        literalCodepoint(.{ .key = .{ .char = 'p' }, .mods = .{ .alt = true } }),
+    );
+    try testing.expectEqual(
+        @as(?u21, null),
+        literalCodepoint(.{ .key = .{ .char = 'p' }, .mods = .{ .super = true } }),
+    );
+    // A named key is not a character however it arrives.
+    try testing.expectEqual(@as(?u21, null), literalCodepoint(.{ .key = .tab }));
+    try testing.expectEqual(@as(?u21, null), literalCodepoint(.{ .key = .{ .f = 5 } }));
 }
 
 test "an unbound chord is null rather than a guess" {
