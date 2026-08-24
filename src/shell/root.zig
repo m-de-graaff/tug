@@ -16,11 +16,20 @@ pub const proto = @import("tugproto");
 
 pub const backend = @import("term/backend.zig");
 pub const caps = @import("term/caps.zig");
+pub const modes = @import("term/modes.zig");
+pub const key = @import("input/key.zig");
+pub const decoder = @import("input/decoder.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;
 pub const Capabilities = caps.Capabilities;
 pub const ColorTier = caps.ColorTier;
+pub const Key = key.Key;
+pub const Mods = key.Mods;
+pub const KeyEvent = key.KeyEvent;
+pub const PasteEvent = key.PasteEvent;
+pub const InputEvent = key.InputEvent;
+pub const Decoder = decoder.Decoder;
 
 test {
     std.testing.refAllDecls(@This());

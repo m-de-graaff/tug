@@ -101,11 +101,11 @@ pub const Impl = struct {
     }
 
     pub fn writer(self: *Impl, io: std.Io, buffer: []u8) std.Io.File.Writer {
-        return .init(.{ .handle = self.fd }, io, buffer);
+        return .init(.{ .handle = self.fd, .flags = .{ .nonblocking = false } }, io, buffer);
     }
 
     pub fn reader(self: *Impl, io: std.Io, buffer: []u8) std.Io.File.Reader {
-        return .init(.{ .handle = self.fd }, io, buffer);
+        return .init(.{ .handle = self.fd, .flags = .{ .nonblocking = false } }, io, buffer);
     }
 };
 
