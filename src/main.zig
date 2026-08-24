@@ -1,34 +1,63 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 
 const tug = @import("tug");
 
-pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+/// The default panic handler symbolizes the stack, which pulls a debug info
+/// reader and the DWARF/PDB parsing that goes with it into the binary. Release
+/// builds get a handler that prints the message and aborts instead, which is
+/// all the information a stripped binary could give anyway.
+pub const panic = if (builtin.mode == .Debug)
+    std.debug.FullPanic(std.debug.defaultPanic)
+else
+    std.debug.simple_panic;
 
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
+/// This program does no networking. Saying so keeps the socket, DNS and TLS
+/// code out of the binary rather than relying on dead code elimination to find
+/// all of it, which is worth about 85 KB here.
+pub const std_options: std.Options = .{
+    .networking = false,
+    .http_disable_tls = true,
+};
 
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
+/// Taking `Init.Minimal` rather than the full `std.process.Init` means the
+/// runtime does not build a general purpose allocator, a process-wide arena, an
+/// environment map or a thread pool before `main` is entered. Nothing here
+/// needs them, and each one costs both code and committed pages.
+pub fn main(init: std.process.Init.Minimal) !void {
+    // A single-threaded `Io` with no allocator behind it.
+    //
+    // ponytail: this instance cannot allocate, so any `Io` call that needs to
+    // (spawning a process, most of `Io.Dir` traversal) will fail rather than
+    // work. Swap in `Io.Threaded.init(gpa, .{})` if the program grows into
+    // those, and take the thread pool with it.
+    var threaded: Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+
+    // Windows hands arguments over as one command line that has to be split
+    // into an owned slice, so this needs an allocator. A stack buffer avoids
+    // pulling a real allocator implementation in.
+    //
+    // ponytail: 16 KB caps the total argument length; past that this returns
+    // `error.OutOfMemory`. Windows itself allows roughly twice that.
+    var args_buffer: [16 * 1024]u8 = undefined;
+    var args_allocator: std.heap.FixedBufferAllocator = .init(&args_buffer);
+    const args = try init.args.toSlice(args_allocator.allocator());
+
+    // One buffered writer for everything the program has to say. Going through
+    // `std.log` or `std.debug.print` instead would pull a second, separately
+    // formatted output path into the binary.
+    var stdout_buffer: [512]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    const stdout = &stdout_file_writer.interface;
+
+    try tug.printAnotherMessage(stdout);
     for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
+        try stdout.print("arg: {s}\n", .{arg});
     }
 
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
-
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
-
-    try tug.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
+    try stdout.flush(); // Don't forget to flush!
 }
 
 test "simple test" {
