@@ -17,6 +17,7 @@ const testing = std.testing;
 
 const Counting = @import("counting_writer.zig").Counting;
 const renderer_mod = @import("renderer.zig");
+const transcript = @import("transcript.zig");
 const Renderer = renderer_mod.Renderer;
 
 const plain_caps: renderer_mod.Capabilities = .{
@@ -35,29 +36,6 @@ const Step = union(enum) {
     paint,
 };
 
-/// Rewrites a frame so a human can review it in a diff: ESC becomes `\e`, CR
-/// becomes `\r`, and LF stays a real newline so the file has real lines.
-fn escape(out: *std.ArrayList(u8), gpa: std.mem.Allocator, bytes: []const u8) !void {
-    for (bytes) |byte| switch (byte) {
-        0x1b => try out.appendSlice(gpa, "\\e"),
-        '\r' => try out.appendSlice(gpa, "\\r"),
-        else => try out.append(gpa, byte),
-    };
-}
-
-/// The goldens are read at run time rather than embedded, because `@embedFile`
-/// cannot reach outside a module's own directory and `testdata/` is shared with
-/// the rest of the repo. `zig build test` runs its binaries from the build root,
-/// which is what makes this relative path work.
-fn readGolden(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
-    var path_buffer: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "testdata/golden/{s}.txt", .{name});
-
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
-    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
-}
-
 fn golden(
     name: []const u8,
     caps: renderer_mod.Capabilities,
@@ -65,11 +43,8 @@ fn golden(
 ) !void {
     const gpa = testing.allocator;
 
-    const expected = try readGolden(gpa, name);
-    defer gpa.free(expected);
-
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
+    var transcript_bytes: std.ArrayList(u8) = .empty;
+    defer transcript_bytes.deinit(gpa);
 
     var renderer: Renderer = .init(gpa, caps, caps.size);
     defer renderer.deinit();
@@ -87,18 +62,11 @@ fn golden(
             try counting.writer.flush();
             // Every golden is also a one-write-per-frame assertion, for free.
             try testing.expect(counting.writes <= 1);
-            try escape(&transcript, gpa, counting.bytes());
+            try transcript_bytes.appendSlice(gpa, counting.bytes());
         },
     };
 
-    const actual = std.mem.trimEnd(u8, transcript.items, "\n");
-    if (std.mem.eql(u8, std.mem.trimEnd(u8, expected, "\n"), actual)) return;
-
-    std.debug.print(
-        "\n--- golden {s} ---\n{s}\n--- end golden {s} ---\n",
-        .{ name, actual, name },
-    );
-    return error.GoldenMismatch;
+    return transcript.expectGolden(gpa, name, transcript_bytes.items);
 }
 
 test "golden: a plain stream in three chunks" {

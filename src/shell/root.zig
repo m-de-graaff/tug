@@ -49,6 +49,8 @@ pub const Runner = runner.Runner;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("render/counting_writer.zig");
+    _ = @import("render/transcript.zig");
     _ = @import("render/golden.zig");
     _ = @import("render/rows_test.zig");
+    _ = @import("provider/golden.zig");
 }
