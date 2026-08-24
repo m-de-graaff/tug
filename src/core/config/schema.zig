@@ -387,6 +387,81 @@ pub const Config = struct {
         self.note_storage[self.note_count] = entry;
         self.note_count += 1;
     }
+
+    // --- the report --------------------------------------------------------
+
+    /// The column the value starts in, and the column `from` starts in. Both are
+    /// minimums, not maximums: a value wider than its column pushes the next one
+    /// right rather than being cut, because a truncated value on the one screen
+    /// whose job is telling you your value would be a bug with a tidy left edge.
+    const setting_column = 21;
+    const value_column = 21;
+
+    fn pad(out: *std.Io.Writer, written: usize, want: usize) std.Io.Writer.Error!void {
+        var index = written;
+        while (index < want) : (index += 1) try out.writeAll(" ");
+        try out.writeAll(" ");
+    }
+
+    fn row(
+        out: *std.Io.Writer,
+        setting: []const u8,
+        value: []const u8,
+        from: Layer,
+    ) std.Io.Writer.Error!void {
+        try out.writeAll(setting);
+        try pad(out, setting.len, setting_column - 1);
+        try out.writeAll(value);
+        try pad(out, value.len, value_column - 1);
+        try out.print("{t}\n", .{from});
+    }
+
+    /// The `/config` screen: every resolved setting, its value, and the layer
+    /// that set it. Phase 10 renders this into a notice block; `--debug-config`
+    /// prints it directly.
+    pub fn write(self: *const Config, out: *std.Io.Writer) std.Io.Writer.Error!void {
+        try out.writeAll("setting              value                from\n");
+
+        try row(out, "theme", self.theme.value, self.theme.source);
+
+        try row(
+            out,
+            "history.enabled",
+            if (self.history_enabled.value) "true" else "false",
+            self.history_enabled.source,
+        );
+
+        var number: [16]u8 = undefined;
+        try row(
+            out,
+            "history.max_entries",
+            std.fmt.bufPrint(&number, "{d}", .{self.history_max_entries.value}) catch "?",
+            self.history_max_entries.source,
+        );
+
+        // Bindings come last and in the order they were collected, which is
+        // layer order. Phase 8 adds the conflict marking; the data is here now.
+        for (self.bindings()) |binding| {
+            var name: [64]u8 = undefined;
+            const setting = std.fmt.bufPrint(&name, "keys.\"{s}\"", .{binding.chord}) catch
+                "keys.\"...\"";
+            try row(out, setting, binding.action, binding.layer);
+        }
+    }
+
+    /// Every warning, one per line, each naming the file it came from.
+    ///
+    /// `origins` is indexed by layer, so a note can say `.tug/config.toml:4:1`
+    /// rather than `line 4` — which file it was is the half a person needs.
+    pub fn writeNotes(
+        self: *const Config,
+        out: *std.Io.Writer,
+        origins: [5][]const u8,
+    ) std.Io.Writer.Error!void {
+        for (self.notes()) |entry| {
+            try entry.write(out, origins[@intFromEnum(entry.layer)]);
+        }
+    }
 };
 
 test "the defaults are the defaults, and they say so" {
@@ -576,4 +651,209 @@ test "the caps hold and say so rather than dropping quietly" {
         if (entry.kind == .too_many_bindings) saw_overflow = true;
     }
     try testing.expect(saw_overflow);
+}
+
+// The `/config` screen, in the layering Phase 10 will render. This expectation
+// is this phase's "provenance golden": a byte-exact record of a resolved config
+// and where every value came from. It is inline rather than a file under
+// `testdata/golden/` because the golden helper lives in `tugshell` and this
+// module may not import it — see the plan's Task 3 for the whole argument.
+test "the resolved report names every value's layer" {
+    var config: Config = .{};
+    config.apply(.user,
+        \\theme = "light"
+        \\[history]
+        \\max_entries = 250
+        \\
+    );
+    config.apply(.project, "[keys]\n\"ctrl+j\" = \"newline\"\n");
+    config.setScalar(.env, "history.enabled", "false");
+
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try config.write(&writer);
+
+    try testing.expectEqualStrings(
+        \\setting              value                from
+        \\theme                light                user
+        \\history.enabled      false                env
+        \\history.max_entries  250                  user
+        \\keys."ctrl+j"        newline              project
+        \\
+    , writer.buffered());
+}
+
+test "an untouched config reports every default as a default" {
+    const config: Config = .{};
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try config.write(&writer);
+
+    try testing.expectEqualStrings(
+        \\setting              value                from
+        \\theme                dark                 default
+        \\history.enabled      true                 default
+        \\history.max_entries  1000                 default
+        \\
+    , writer.buffered());
+}
+
+test "a value too wide for its column pushes the next one instead of being cut" {
+    var config: Config = .{};
+    config.apply(.user, "theme = \"a-theme-name-that-is-far-too-long-for-the-column\"\n");
+
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try config.write(&writer);
+
+    // The column is a minimum, not a maximum. A truncated value in the one
+    // screen that exists to tell you what your value is would be a bug with a
+    // tidy left edge.
+    try testing.expectEqualStrings(
+        \\setting              value                from
+        \\theme                a-theme-name-that-is-far-too-long-for-the-column user
+        \\history.enabled      true                 default
+        \\history.max_entries  1000                 default
+        \\
+    , writer.buffered());
+}
+
+// The malformed corpus. Each case is a whole file, and the assertion is on the
+// notes it produces *and* on the settings that survived it — because "warn,
+// ignore, continue" is three claims and the third is the one that matters.
+test "the malformed corpus warns, ignores, and continues" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        want: []const Note.Kind,
+        /// What `theme` must be afterwards. The default proves nothing landed;
+        /// a value proves the file kept going past the damage.
+        theme: []const u8,
+    }{
+        .{
+            .name = "garbage bytes",
+            .source = "\x00\x01\xff\xfe binary nonsense \x7f\n",
+            // One line of rubbish is one problem: a key made of bytes that are
+            // not key bytes, so there is no key.
+            .want = &.{.expected_key},
+            .theme = default_theme,
+        },
+        .{
+            .name = "an empty file",
+            .source = "",
+            .want = &.{},
+            .theme = default_theme,
+        },
+        .{
+            .name = "only comments and blank lines",
+            .source = "# nothing here\n\n   \n# nor here\n",
+            .want = &.{},
+            .theme = default_theme,
+        },
+        .{
+            .name = "wrong types on every scalar",
+            .source =
+            \\theme = 12
+            \\[history]
+            \\enabled = "no"
+            \\max_entries = true
+            \\
+            ,
+            .want = &.{ .wrong_type, .wrong_type, .wrong_type },
+            .theme = default_theme,
+        },
+        .{
+            .name = "unknown keys around a good one",
+            .source =
+            \\colour = "purple"
+            \\theme = "light"
+            \\fontsize = 12
+            \\
+            ,
+            .want = &.{ .unknown_key, .unknown_key },
+            .theme = "light",
+        },
+        .{
+            .name = "an unclosed string does not swallow the rest of the file",
+            .source =
+            \\name = "unclosed
+            \\theme = "light"
+            \\
+            ,
+            .want = &.{.unterminated_string},
+            .theme = "light",
+        },
+        .{
+            .name = "TOML this subset refuses, one of each",
+            .source =
+            \\hosts = ["a", "b"]
+            \\point = { x = 1 }
+            \\a.b = 1
+            \\escaped = "one\ttwo"
+            \\theme = "light"
+            \\
+            ,
+            .want = &.{
+                .array_unsupported,
+                .inline_table_unsupported,
+                .dotted_key_unsupported,
+                .escape_unsupported,
+            },
+            .theme = "light",
+        },
+        .{
+            .name = "duplicate keys in one file",
+            .source = "theme = \"a\"\ntheme = \"light\"\n",
+            .want = &.{.duplicate_key},
+            .theme = "light",
+        },
+        .{
+            .name = "a section header that is not a section",
+            .source = "[[servers]]\nname = \"x\"\ntheme = \"light\"\n",
+            // The `[[` is refused, so `name` is still at the top level, where
+            // there is no such key.
+            .want = &.{ .array_of_tables_unsupported, .unknown_key },
+            .theme = "light",
+        },
+    };
+
+    for (cases) |case| {
+        var config: Config = .{};
+        config.apply(.user, case.source);
+
+        testing.expectEqual(case.want.len, config.notes().len) catch |err| {
+            std.debug.print("\ncorpus case: {s}\n", .{case.name});
+            for (config.notes()) |got| std.debug.print("  {t}\n", .{got.kind});
+            return err;
+        };
+        for (case.want, config.notes()) |want, got| {
+            testing.expectEqual(want, got.kind) catch |err| {
+                std.debug.print("\ncorpus case: {s}\n", .{case.name});
+                return err;
+            };
+        }
+        try testing.expectEqualStrings(case.theme, config.theme.value);
+    }
+}
+
+test "notes render with the file they came from" {
+    var config: Config = .{};
+    config.apply(.project, "colour = \"purple\"\n");
+    config.setScalar(.env, "history.enabled", "maybe");
+
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try config.writeNotes(&writer, .{
+        "<defaults>",
+        "/home/x/.config/tug/config.toml",
+        ".tug/config.toml",
+        "<environment>",
+        "<flags>",
+    });
+
+    try testing.expectEqualStrings(
+        \\.tug/config.toml:1:1: warning: no such setting ('colour')
+        \\<environment>:0:0: warning: the value is not the type this setting takes ('history.enabled')
+        \\
+    , writer.buffered());
 }
