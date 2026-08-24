@@ -1,0 +1,5 @@
+Try this:\r
+\r
+\e[2mconst x = **not bold**;\e[0m\r
+\r
+Done.\r

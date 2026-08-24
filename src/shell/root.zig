@@ -45,4 +45,5 @@ pub const BlockKind = renderer.BlockKind;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("render/counting_writer.zig");
+    _ = @import("render/golden.zig");
 }

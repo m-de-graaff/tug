@@ -1,0 +1,5 @@
+ab\r
+\e[2m... streaming\e[0m\r
+\r\e[2F\e[0Jab日cd\r
+\e[2m... streaming\e[0m\r
+\r\e[2F\e[0Jab日cd\r
