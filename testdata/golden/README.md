@@ -29,6 +29,25 @@ Two of the `mock-*` files look wrong at a glance and are not:
   every four chunks precisely to keep it to that; painting through it produced a
   thousand lines, and a golden nobody reads is not a test.
 
+The `editor-*.txt` family comes from `src/shell/edit/golden.zig`, which drives a
+scripted editing session — keys through the action layer, into the draft, out
+through the prompt region — rather than a stream. They differ from the others in
+one way that matters: **every one of them ends in a cursor move**, and the
+cursor move is the assertion. `\e[nF` says how far above the parking row the
+frame left the caret, and the frame after it must rewind by exactly `tail_rows`
+minus that. A diff that changes only the trailing `\e[nF\e[nC` is a
+cursor-parking change, and `DR-011` is what to re-read before accepting it.
+
+Two of the `editor-*` files look wrong at a glance and are not:
+
+- **`editor-wrap.txt` breaks a word in half.** The prompt hard-wraps at the
+  column where the rest of the tail wraps at spaces, so that the character under
+  the cursor never moves to another row while you are typing the word in front
+  of it. `DR-011` is the argument.
+- **`editor-window.txt` does not start with the first line of its draft.** The
+  draft is taller than the tail, so what is drawn is the window containing the
+  cursor. The second frame shows a different window because the cursor moved.
+
 To regenerate one, change the renderer, run `zig build test`, and copy the
 transcript the failing test prints between its `--- golden <name> ---` markers.
 Read it before you paste it: an off-by-one in a repaint looks exactly like a

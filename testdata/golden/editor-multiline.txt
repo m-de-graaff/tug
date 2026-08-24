@@ -1,0 +1,5 @@
+> first\r
+  second\r
+\e[1F\e[8C\r\e[1F\e[0J> first\r
+  second\r
+\e[2F\e[7C

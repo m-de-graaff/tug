@@ -1,0 +1,13 @@
+  three\r
+  four\r
+  five\r
+  six\r
+  seven\r
+  eight\r
+\e[1F\e[7C\r\e[5F\e[0J> one\r
+  two\r
+  three\r
+  four\r
+  five\r
+  six\r
+\e[1F\e[2C

@@ -1,0 +1,6 @@
+> the quick brown fox ju\r
+  mps over it\r
+\e[1F\e[13C\e[1E> the quick br\r
+  own fox jump\r
+  s over it\r
+\e[1F\e[11C

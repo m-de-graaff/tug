@@ -63,6 +63,7 @@ test {
     _ = @import("render/transcript.zig");
     _ = @import("render/golden.zig");
     _ = @import("render/rows_test.zig");
+    _ = @import("edit/golden.zig");
     _ = @import("provider/golden.zig");
     _ = @import("provider/firehose_test.zig");
 }

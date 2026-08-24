@@ -1,0 +1,4 @@
+> hello world\r
+\e[1F\e[13C\r\e[0J> hello world\r
+\e[1F\e[2C\r\e[0J> hello world\r
+\e[1F\e[4C
