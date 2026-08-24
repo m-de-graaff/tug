@@ -21,10 +21,11 @@
 
 const std = @import("std");
 
-/// The cap, from the spec. Reached, the oldest entries are dropped and the file
-/// is rewritten — "truncate from the front", which is the only truncation that
-/// keeps what a person is likely to want.
-pub const max_entries: usize = 1000;
+/// The default cap, from the spec. `[history] max_entries` overrides it, and
+/// the field on `History` is what `trim` reads — so a config that names a
+/// smaller number takes effect on the next submission rather than on the next
+/// start.
+pub const default_max_entries: usize = 1000;
 
 /// The most history tug will read. A file larger than this has been corrupted
 /// or appended to by something else, and the right response is an empty history
@@ -110,8 +111,15 @@ pub const History = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     /// Borrowed and outlives this struct. Null means this session has no
-    /// persistent history — every method still works, in memory.
+    /// persistent history — every method still works, in memory. `repl.run`
+    /// clears it when `[history] enabled = false`, which is why "off" needs no
+    /// branch of its own: it is a case the type already had.
     path: ?[]const u8,
+
+    /// Reached, the oldest entries are dropped and the file is rewritten.
+    /// `[history] max_entries` sets it; `repl.run` assigns it after the config
+    /// is loaded and before anything reads the file.
+    max_entries: usize = default_max_entries,
 
     /// Oldest first, so an append is a push and the cap is a shift.
     entries: std.ArrayList([]u8) = .empty,
@@ -256,8 +264,8 @@ pub const History = struct {
 
     /// Drops from the front until the cap is met.
     fn trim(self: *History) void {
-        if (self.entries.items.len <= max_entries) return;
-        const over = self.entries.items.len - max_entries;
+        if (self.entries.items.len <= self.max_entries) return;
+        const over = self.entries.items.len - self.max_entries;
         for (self.entries.items[0..over]) |entry| self.gpa.free(entry);
         std.mem.copyForwards([]u8, self.entries.items, self.entries.items[over..]);
         self.entries.items.len -= over;
@@ -473,10 +481,10 @@ test "the cap drops the oldest entries rather than refusing new ones" {
     defer history.deinit();
 
     var buffer: [16]u8 = undefined;
-    for (0..max_entries + 5) |index| {
+    for (0..default_max_entries + 5) |index| {
         history.append(try std.fmt.bufPrint(&buffer, "entry {d}", .{index}));
     }
-    try testing.expectEqual(max_entries, history.count());
+    try testing.expectEqual(default_max_entries, history.count());
 
     // The newest is still reachable and the oldest is gone.
     try testing.expectEqualStrings("entry 1004", history.prev("").?);

@@ -81,10 +81,10 @@ of it, against a compiler pin that moves — to serve four value types.
 ### The size number
 
 The bar was a delta of 50 KiB. The `ReleaseSmall` static Linux binary went from
-**155,584 B** at the start of Phase 7 to **[FINAL] B** at its end, a delta of
-**[DELTA] B** for the scanner, the schema, the five-layer merge, the diagnostics
-and the resolved report together — the whole config stack, not just the parser.
-Both numbers come from `zig build size`.
+**155,584 B** at the start of Phase 7 to **173,088 B** at its end, a delta of
+**17,504 B**, or 34% of the bar — and that is for the scanner, the schema, the
+five-layer merge, the diagnostics and the resolved report together. The whole
+config stack, not just the parser. Both numbers come from `zig build size`.
 
 Size is recorded because the bar named it. It is not what decided this, and a
 candidate that had come in smaller would still have lost on the two points above.

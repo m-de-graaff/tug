@@ -30,6 +30,7 @@ const actions = @import("edit/actions.zig");
 const backend = @import("term/backend.zig");
 const cadence_mod = @import("provider/cadence.zig");
 const caps_mod = @import("term/caps.zig");
+const config_mod = @import("config/load.zig");
 const decoder_mod = @import("input/decoder.zig");
 const editor_mod = @import("edit/editor.zig");
 const history_mod = @import("edit/history.zig");
@@ -358,6 +359,9 @@ pub const Setup = struct {
     /// Borrowed for the whole call. Null means no persistent history.
     history_path: ?[]const u8,
     provider: ?Provider,
+    /// Where the config files are and what the environment says about them.
+    /// Read after the first paint — see `run`.
+    config: config_mod.Sources = .{},
 };
 
 /// Opens the shell and does not return until the user leaves it.
@@ -414,6 +418,22 @@ pub fn run(
     renderer.setPrompt(.{ .text = "", .cursor = 0 });
     _ = try renderer.paint(screen);
     try screen.flush();
+
+    // After the first paint, for the reason the probe is: the cold-start budget
+    // is 10 ms and two file reads are not free. Nothing above this line reads a
+    // setting, which is what makes the ordering safe rather than merely fast.
+    var loaded = config_mod.load(gpa, io, setup.config);
+    defer loaded.deinit(gpa);
+
+    // The two settings v0.1 has a consumer for. The theme and the keymap are
+    // carried with their provenance and read by Phases 9 and 8; the notes are
+    // read by Phase 10's `/config`, and `--debug-config` prints all three today.
+    //
+    // The history has not opened its file at this point — it opens on the first
+    // press of `up` — which is what makes clearing the path here the same thing
+    // as never having had one.
+    if (!loaded.config.history_enabled.value) history.path = null;
+    history.max_entries = loaded.config.history_max_entries.value;
 
     var probe_buffer: [probe_mod.buffer_bytes]u8 = undefined;
     const probed = probe_mod.run(io, &terminal, &probe_buffer);

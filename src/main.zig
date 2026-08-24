@@ -63,10 +63,11 @@ const usage =
     \\debugging:
     \\  --caps             Print detected terminal capabilities and exit.
     \\  --debug-keys       Echo decoded key events until ctrl+c.
+    \\  --debug-config     Print the resolved config with provenance and exit.
     \\
 ;
 
-const Command = enum { help, version, caps, debug_keys, mock, shell };
+const Command = enum { help, version, caps, debug_keys, debug_config, mock, shell };
 
 /// Which provider answers a turn. An enum rather than a bool because v0.2 adds
 /// two more and this is where they will land.
@@ -119,6 +120,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return stdout.flush();
         },
         .debug_keys => return debugKeys(io, stdout, init.environ, environment_allocator.allocator()),
+        .debug_config => {
+            try printConfig(io, stdout, init.environ, environment_allocator.allocator());
+            return stdout.flush();
+        },
         .mock => return runMock(
             io,
             stdout,
@@ -131,6 +136,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const history_path = try shell.history.resolvePath(
                 environment_allocator.allocator(),
                 environment.state,
+                builtin.os.tag == .windows,
+            );
+            const config_path = try shell.config.userPath(
+                environment_allocator.allocator(),
+                environment.config,
                 builtin.os.tag == .windows,
             );
             return shell.repl.run(
@@ -148,6 +158,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     .provider = switch (options.provider) {
                         .none => null,
                         .mock => .{ .mock = options.mock, .cadence = options.cadence },
+                    },
+                    .config = .{
+                        .user_path = config_path,
+                        .env = environment.config_env,
                     },
                 },
             );
@@ -173,6 +187,7 @@ fn parseArgs(argv: []const [:0]const u8) Options {
         if (eqlAny(arg, &.{ "--help", "-h" })) return .{ .command = .help };
         if (eqlAny(arg, &.{"--caps"})) return .{ .command = .caps };
         if (eqlAny(arg, &.{"--debug-keys"})) return .{ .command = .debug_keys };
+        if (eqlAny(arg, &.{"--debug-config"})) return .{ .command = .debug_config };
 
         if (eqlAny(arg, &.{"--once"})) {
             options.once = true;
@@ -236,20 +251,26 @@ fn printVersion(out: *std.Io.Writer) std.Io.Writer.Error!void {
 const Environment = struct {
     caps: shell.caps.Env = .{},
     state: shell.history.Location = .{},
+    config: shell.config.Location = .{},
+    /// The `TUG_*` values, indexed by `core.config.env_keys`. Held by index
+    /// rather than by name so the loader can apply them without knowing any
+    /// variable's spelling — the table is the mapping and the only mapping.
+    config_env: [core.config.env_keys.len]?[]const u8 = @splat(null),
 };
 
-/// Reads the environment into the pure values the detector and the history want.
+/// Reads the environment into the pure values the detector, the history and the
+/// config want.
 ///
-/// Seven variables, one pass. The detector never sees the environment itself —
-/// that separation is what lets the decision logic be table-tested on a machine
-/// with no terminal — and the same is true of the history path.
+/// One pass. The detector never sees the environment itself — that separation is
+/// what lets the decision logic be table-tested on a machine with no terminal —
+/// and the same is true of the history path and the config layer.
 ///
 /// The map is built once and deliberately not deinitialized: the returned
 /// values borrow its strings, and `gpa` is a fixed buffer that outlives every
 /// use of them. Freeing here would hand back dangling slices.
 fn readEnvironment(environ: std.process.Environ, gpa: std.mem.Allocator) Environment {
     var map = environ.createMap(gpa) catch return .{};
-    return .{
+    var environment: Environment = .{
         .caps = .{
             // Presence is the signal; the value is explicitly irrelevant.
             .no_color = map.get("NO_COLOR") != null,
@@ -262,7 +283,17 @@ fn readEnvironment(environ: std.process.Environ, gpa: std.mem.Allocator) Environ
             .home = map.get("HOME"),
             .local_app_data = map.get("LOCALAPPDATA"),
         },
+        .config = .{
+            .xdg_config_home = map.get("XDG_CONFIG_HOME"),
+            .home = map.get("HOME"),
+            .app_data = map.get("APPDATA"),
+        },
     };
+
+    for (core.config.env_keys, 0..) |entry, index| {
+        environment.config_env[index] = map.get(entry.variable);
+    }
+    return environment;
 }
 
 /// The usage text plus the live keymap.
@@ -296,6 +327,38 @@ fn printUsage(out: *std.Io.Writer) std.Io.Writer.Error!void {
             .legacy => try out.writeAll(" (without the kitty keyboard protocol)"),
         }
         try out.writeAll("\n");
+    }
+}
+
+/// The resolved config and every warning, printed without opening a terminal.
+///
+/// This is Phase 10's `/config` reading the same data through a debug flag, the
+/// way `--caps` is Phase 11's terminal-matrix tool arriving early. It is also
+/// the only caller of the report writers in v0.1, which is what keeps them from
+/// being dead code the linker drops before anybody measures them.
+fn printConfig(
+    io: std.Io,
+    out: *std.Io.Writer,
+    environ: std.process.Environ,
+    gpa: std.mem.Allocator,
+) !void {
+    const environment = readEnvironment(environ, gpa);
+    const user_path = try shell.config.userPath(
+        gpa,
+        environment.config,
+        builtin.os.tag == .windows,
+    );
+
+    var loaded = shell.config.load(gpa, io, .{
+        .user_path = user_path,
+        .env = environment.config_env,
+    });
+    defer loaded.deinit(gpa);
+
+    try loaded.config.write(out);
+    if (loaded.config.notes().len > 0) {
+        try out.writeAll("\n");
+        try loaded.config.writeNotes(out, loaded.origins);
     }
 }
 
@@ -681,6 +744,7 @@ test "commands are recognized and the default is the shell" {
         .{ .args = &.{ "tug", "--help" }, .want = .help },
         .{ .args = &.{ "tug", "--caps" }, .want = .caps },
         .{ .args = &.{ "tug", "--debug-keys" }, .want = .debug_keys },
+        .{ .args = &.{ "tug", "--debug-config" }, .want = .debug_config },
         // A provider on its own opens the shell; the one-turn path is a flag.
         .{ .args = &.{ "tug", "--provider", "mock" }, .want = .shell },
         .{ .args = &.{ "tug", "--provider", "mock", "--once" }, .want = .mock },

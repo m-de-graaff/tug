@@ -42,6 +42,11 @@ fail() {
     exit 1
 }
 
+# Extra environment for the next `drive`, as `NAME=value` pairs. Set it, call
+# `drive`, and it is cleared again — an assignment that leaked into a later case
+# would be a test passing for the wrong reason.
+extra_env=""
+
 # Runs the binary under a pty with $1 driving its stdin.
 #
 # The input is a shell fragment rather than a string so each case reads as the
@@ -52,9 +57,11 @@ drive() {
     input=$1
     shift
     if ! eval "$input" | timeout 60 script -qec \
-        "XDG_STATE_HOME=$state $binary $*" /dev/null >"$capture" 2>&1; then
+        "env XDG_STATE_HOME=$state $extra_env $binary $*" /dev/null >"$capture" 2>&1; then
+        extra_env=""
         fail "the session did not exit cleanly"
     fi
+    extra_env=""
 }
 
 # --- a prompt appears, and ctrl+d leaves ------------------------------------
@@ -139,5 +146,35 @@ if [ "$entries" -lt 3 ]; then
     fail "expected at least three history entries, found $entries"
 fi
 echo "editor-session: $entries entries, one line each"
+
+# --- the config reaches the shell, not just --debug-config ------------------
+#
+# `--debug-config` prints the resolved config without ever calling `repl.run`,
+# so on its own it proves the loader works and says nothing about whether the
+# shell uses what it loaded. `[history] enabled = false` is the one v0.1 setting
+# whose effect is visible from outside the process: with it set, a submission
+# must leave the history file exactly as it was.
+config=$(mktemp -d)
+trap 'rm -rf "$state" "$capture" "$config"' EXIT
+mkdir -p "$config/tug"
+cat >"$config/tug/config.toml" <<'TOML'
+[history]
+enabled = false
+TOML
+
+before=$(wc -l <"$history_file" | tr -d ' ')
+extra_env="XDG_CONFIG_HOME=$config"
+drive "sleep 1; printf 'not recorded'; sleep 1; printf '\r'; sleep 3; printf '\004'"
+after=$(wc -l <"$history_file" | tr -d ' ')
+
+grep -q 'not recorded' "$capture" ||
+    fail "the draft never reached the editor in the history-disabled run"
+if [ "$before" != "$after" ]; then
+    fail "history was disabled in the config and the file still grew: $before -> $after"
+fi
+if grep -qF 'not recorded' "$history_file"; then
+    fail "a submission was written to a history the config had turned off"
+fi
+echo "editor-session: [history] enabled = false reaches the shell and holds"
 
 echo "editor-session: the editor behaves"
