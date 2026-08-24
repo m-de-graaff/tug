@@ -359,6 +359,23 @@ fn testIo(threaded: *std.Io.Threaded) std.Io {
     return threaded.io();
 }
 
+/// A path under `testing.tmpDir`'s directory, joined with the platform's own
+/// separator.
+///
+/// Native rather than `/`, because that is what `resolvePath` produces and
+/// therefore what the code under test actually receives. Hardcoding `/` made
+/// this fail on Windows — and, worse, made two of the tests below pass for the
+/// wrong reason, since a path no directory was ever created for fails to read
+/// and fails to write exactly as an absent one does.
+fn tmpPath(buffer: []u8, tmp: *const testing.TmpDir, tail: []const u8) ![]const u8 {
+    const sep = std.fs.path.sep_str;
+    return std.fmt.bufPrint(
+        buffer,
+        ".zig-cache" ++ sep ++ "tmp" ++ sep ++ "{s}" ++ sep ++ "{s}",
+        .{ tmp.sub_path, tail },
+    );
+}
+
 test "the POSIX path prefers XDG_STATE_HOME and falls back to HOME" {
     const gpa = testing.allocator;
 
@@ -519,11 +536,8 @@ test "entries survive a restart, multiline ones included" {
     defer tmp.cleanup();
 
     var path_buffer: [128]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/state/tug/history",
-        .{tmp.sub_path},
-    );
+    const sep = std.fs.path.sep_str;
+    const path = try tmpPath(&path_buffer, &tmp, "state" ++ sep ++ "tug" ++ sep ++ "history");
 
     {
         var history: History = .init(gpa, io, path);
@@ -533,6 +547,11 @@ test "entries survive a restart, multiline ones included" {
         history.append("first\nsecond");
         try testing.expect(!history.write_failed);
     }
+
+    // The file is really on disk, not just in the second History's memory.
+    const raw = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
+    defer gpa.free(raw);
+    try testing.expect(std.mem.indexOf(u8, raw, "first\\nsecond") != null);
 
     var reopened: History = .init(gpa, io, path);
     defer reopened.deinit();
@@ -552,11 +571,7 @@ test "a missing file is an empty history, not a failure" {
     defer tmp.cleanup();
 
     var path_buffer: [128]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/never-written",
-        .{tmp.sub_path},
-    );
+    const path = try tmpPath(&path_buffer, &tmp, "never-written");
 
     var history: History = .init(gpa, io, path);
     defer history.deinit();
@@ -578,11 +593,8 @@ test "a path that cannot be written records the failure and keeps going" {
     try tmp.dir.writeFile(io, .{ .sub_path = "blocker", .data = "not a directory" });
 
     var path_buffer: [128]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/blocker/tug/history",
-        .{tmp.sub_path},
-    );
+    const sep = std.fs.path.sep_str;
+    const path = try tmpPath(&path_buffer, &tmp, "blocker" ++ sep ++ "tug" ++ sep ++ "history");
 
     var history: History = .init(gpa, io, path);
     defer history.deinit();
