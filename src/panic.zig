@@ -5,10 +5,9 @@
 //! Ctrl+C — the message explaining what went wrong is unreadable in the
 //! terminal it broke. So the terminal is restored *before* anything is printed.
 //!
-//! `restore` is installed by the terminal backend once raw mode is entered and
-//! cleared when it is given back. It stays null until then, which is why the
-//! hook exists from the first commit and its implementation arrives with the
-//! backend.
+//! The restore itself lives in `tugshell`, which is where the saved terminal
+//! state lives; it is idempotent and does nothing when raw mode was never
+//! entered, so this handler can call it unconditionally.
 //!
 //! Nothing here phones home, writes a report file, or unwinds. It restores,
 //! prints to stderr, and traps.
@@ -16,15 +15,13 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-/// Must be async-signal-safe and safe to call twice — a panic inside the
-/// restore path is exactly the case where it will be called twice.
-pub var restore: ?*const fn () void = null;
+const shell = @import("tugshell");
 
 fn onPanic(message: []const u8, first_trace_address: ?usize) noreturn {
     @branchHint(.cold);
     _ = first_trace_address;
 
-    if (restore) |restore_fn| restore_fn();
+    shell.backend.restoreForPanic();
 
     var buffer: [256]u8 = undefined;
     const stderr = &std.debug.lockStderr(&buffer).file_writer.interface;

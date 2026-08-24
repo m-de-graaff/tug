@@ -4,15 +4,23 @@
 //! detection, the mode stack, input decoding, and later the renderer, the
 //! editor, keymaps and themes.
 //!
-//! The split from `tugcore` is not stylistic. Core holds logic that a browser
-//! tab could run; shell holds the parts that need a tty, a signal, or a file
-//! descriptor. When something looks like it belongs in both, it belongs in
-//! core with the IO injected.
+//! The split from `tugcore` is not stylistic. Core holds logic a browser tab
+//! could run; shell holds the parts that need a tty, a signal, or a file
+//! descriptor. When something looks like it belongs in both, it belongs in core
+//! with the IO injected.
 
 const std = @import("std");
 
 pub const core = @import("tugcore");
 pub const proto = @import("tugproto");
+
+pub const backend = @import("term/backend.zig");
+pub const caps = @import("term/caps.zig");
+
+pub const Backend = backend.Backend;
+pub const Size = backend.Size;
+pub const Capabilities = caps.Capabilities;
+pub const ColorTier = caps.ColorTier;
 
 test {
     std.testing.refAllDecls(@This());
