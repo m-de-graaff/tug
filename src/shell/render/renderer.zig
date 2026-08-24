@@ -700,3 +700,148 @@ test "a wrapped list item hangs under its own text" {
     try testing.expect(std.mem.indexOf(u8, painted.output, "\u{2022} alpha") != null);
     try testing.expect(std.mem.indexOf(u8, painted.output, "\r\n  bravo") != null);
 }
+
+test "a tail taller than the screen commits its oldest rows to scrollback" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 5 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    for (0..8) |i| {
+        var line: [8]u8 = undefined;
+        try renderer.feed(try std.fmt.bufPrint(&line, "line{d}\n", .{i}));
+    }
+
+    var buffer: [8192]u8 = undefined;
+    var sink: [8192]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+
+    // capacity is rows - 2, and the status hint is one of the rows that has to
+    // fit inside it.
+    try testing.expectEqual(@as(u32, 6), painted.frame.committed_rows);
+    try testing.expectEqual(@as(u32, 3), painted.frame.tail_rows);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "line0") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "line7") != null);
+}
+
+test "committed lines are dropped and never painted twice" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 5 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    for (0..8) |i| {
+        var line: [8]u8 = undefined;
+        try renderer.feed(try std.fmt.bufPrint(&line, "line{d}\n", .{i}));
+    }
+
+    var buffer: [8192]u8 = undefined;
+    var sink: [8192]u8 = undefined;
+    _ = try paintOnce(&renderer, &buffer, &sink);
+
+    var buffer2: [8192]u8 = undefined;
+    var sink2: [8192]u8 = undefined;
+    const second = try paintOnce(&renderer, &buffer2, &sink2);
+    try testing.expectEqual(@as(u32, 0), second.frame.committed_rows);
+    try testing.expect(std.mem.indexOf(u8, second.output, "line0") == null);
+    try testing.expect(std.mem.indexOf(u8, second.output, "line7") != null);
+}
+
+test "closing a block commits all of it and clears the status hint" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("done");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const streaming = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, streaming.output, "streaming") != null);
+
+    try renderer.endBlock();
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const closed = try paintOnce(&renderer, &buffer2, &sink2);
+
+    try testing.expectEqual(@as(u32, 0), closed.frame.tail_rows);
+    try testing.expectEqual(@as(u32, 1), closed.frame.committed_rows);
+    try testing.expect(std.mem.indexOf(u8, closed.output, "streaming") == null);
+    try testing.expect(std.mem.indexOf(u8, closed.output, "done") != null);
+}
+
+test "after a committed block the next paint moves back over nothing" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("done");
+    try renderer.endBlock();
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    _ = try paintOnce(&renderer, &buffer, &sink);
+
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const after = try paintOnce(&renderer, &buffer2, &sink2);
+    try testing.expectEqualStrings("\r\x1b[0J", after.output);
+}
+
+test "a narrower terminal rewraps the tail and nothing else" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("alpha bravo charlie\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const wide_frame = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expectEqual(@as(u32, 2), wide_frame.frame.tail_rows);
+
+    renderer.setSize(.{ .cols = 10, .rows = 10 });
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const narrow = try paintOnce(&renderer, &buffer2, &sink2);
+    try testing.expectEqual(@as(u32, 4), narrow.frame.tail_rows);
+    // The cursor-up is the count from the frame before, at the old width: the
+    // terminal reflowed those rows itself and tug does not second-guess it.
+    try testing.expect(std.mem.startsWith(u8, narrow.output, "\r\x1b[2F\x1b[0J"));
+    try testing.expect(std.mem.indexOf(u8, narrow.output, "alpha\r\n") != null);
+}
+
+test "a notice block renders dim and plain, markdown untouched" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 40, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.notice);
+    try renderer.feed("stream failed: **not** markdown\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "**not**") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "\x1b[2m") != null);
+}
+
+test "opening a block while one is open closes the first" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.user);
+    try renderer.feed("question");
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("answer");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expectEqual(@as(u32, 1), painted.frame.committed_rows);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "question") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "answer") != null);
+}
+
+test "a one-row terminal still paints and still commits" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 1 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("a\nb\nc\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expectEqual(@as(u32, 3), painted.frame.committed_rows);
+    try testing.expectEqual(@as(u32, 1), painted.frame.tail_rows);
+}
