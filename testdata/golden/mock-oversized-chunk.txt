@@ -1,0 +1,373 @@
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[1mThe seam\e[0m\r
+\r
+Every token the harness injects into a\r
+context is a cost somebody pays.\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+\r
+1. a shell, a loop, two providers, four\r
+   tools\r
+2. a shell, a loop, two providers, four\r
+   tools\r
+3. repaint the tail, never the\r
+   scrollback\r
+\r
+• a shell, a loop, two providers, four\r
+  tools\r
+• one write per frame, and the row count\r
+  exact\r
+• a shell, a loop, two providers, four\r
+  tools\r
+\r
+\e[1mThe seam\e[0m\r
+\r
+• repaint the tail, never the scrollback\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• one write per frame, and the row count\r
+  exact\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[1mBudgets\e[0m\r
+\r
+Every token the harness injects into a\r
+context is a cost somebody pays.\r
+One static binary, no runtime, no\r
+telemetry, and a budget that CI\r
+enforces.\r
+\r
+日本語のテキストも折り返します。 🚢 And\r
+back to \e[3mASCII\e[0m again.\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. wrap to the terminal width, never to\r
+   a guess\r
+3. wrap to the terminal width, never to\r
+   a guess\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. repaint the tail, never the\r
+   scrollback\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+\e[1mThe seam\e[0m\r
+\r
+日本語のテキストも折り返します。 🚢 And\r
+back to \e[3mASCII\e[0m again.\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+• one write per frame, and the row count\r
+  exact\r
+• one write per frame, and the row count\r
+  exact\r
+• repaint the tail, never the scrollback\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. wrap to the terminal width, never to\r
+   a guess\r
+3. a shell, a loop, two providers, four\r
+   tools\r
+\r
+\e[1mBollard pull\e[0m\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+1. one write per frame, and the row\r
+   count exact\r
+2. a shell, a loop, two providers, four\r
+   tools\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+• a shell, a loop, two providers, four\r
+  tools\r
+• one write per frame, and the row count\r
+  exact\r
+• one write per frame, and the row count\r
+  exact\r
+\r
+\e[1mBollard pull\e[0m\r
+\r
+• repaint the tail, never the scrollback\r
+• one write per frame, and the row count\r
+  exact\r
+• wrap to the terminal width, never to a\r
+  guess\r
+\r
+日本語のテキストも折り返します。 🚢 And\r
+back to \e[3mASCII\e[0m again.\r
+\r
+日本語のテキストも折り返します。 🚢 And\r
+back to \e[3mASCII\e[0m again.\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[1mThe seam\e[0m\r
+\r
+The core is a \e[3mfreestanding library\e[0m; the\r
+CLI is merely its first frontend.\r
+Anything measurable gets a budget, and\r
+budgets are enforced by CI rather than\r
+by intentions.\r
+\r
+The core is a \e[3mfreestanding library\e[0m; the\r
+CLI is merely its first frontend.\r
+Every token the harness injects into a\r
+context is a cost somebody pays.\r
+\r
+A tugboat's power is rated in \e[1mbollard\e[0m\r
+\e[1mpull\e[0m, and the number is absurd for its\r
+size.\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+\r
+\e[1mBudgets\e[0m\r
+\r
+1. a shell, a loop, two providers, four\r
+   tools\r
+2. a shell, a loop, two providers, four\r
+   tools\r
+3. repaint the tail, never the\r
+   scrollback\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. one write per frame, and the row\r
+   count exact\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+The core is a \e[3mfreestanding library\e[0m; the\r
+CLI is merely its first frontend.\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. repaint the tail, never the\r
+   scrollback\r
+3. repaint the tail, never the\r
+   scrollback\r
+\r
+One static binary, no runtime, no\r
+telemetry, and a budget that CI\r
+enforces.\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+\r
+\e[1mBudgets\e[0m\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• one write per frame, and the row count\r
+  exact\r
+• repaint the tail, never the scrollback\r
+\r
+The core is a \e[3mfreestanding library\e[0m; the\r
+CLI is merely its first frontend.\r
+A tugboat's power is rated in \e[1mbollard\e[0m\r
+\e[1mpull\e[0m, and the number is absurd for its\r
+size.\r
+\r
+1. one write per frame, and the row\r
+   count exact\r
+2. one write per frame, and the row\r
+   count exact\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+The core is a \e[3mfreestanding library\e[0m; the\r
+CLI is merely its first frontend.\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+\r
+日本語のテキストも折り返します。 🚢 And\r
+back to \e[3mASCII\e[0m again.\r
+\r
+Anything measurable gets a budget, and\r
+budgets are enforced by CI rather than\r
+by intentions.\r
+Every token the harness injects into a\r
+context is a cost somebody pays.\r
+\r
+• one write per frame, and the row count\r
+  exact\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• wrap to the terminal width, never to a\r
+  guess\r
+\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+\r
+One static binary, no runtime, no\r
+telemetry, and a budget that CI\r
+enforces.\r
+The core is a \e[3mfreestanding library\e[0m; the\r
+CLI is merely its first frontend.\r
+\r
+1. repaint the tail, never the\r
+   scrollback\r
+2. repaint the tail, never the\r
+   scrollback\r
+3. a shell, a loop, two providers, four\r
+   tools\r
+\r
+If a feature can be a plugin then it is\r
+a plugin, and the bar for core is that\r
+the harness is broken without it.\r
+Every token the harness injects into a\r
+context is a cost somebody pays.\r
+\r
+日本語のテキストも折り返します。 🚢 And\r
+back to \e[3mASCII\e[0m again.\r
+\r
+One static binary, no runtime, no\r
+telemetry, and a budget that CI\r
+enforces.\r
+Anything measurable gets a budget, and\r
+budgets are enforced by CI rather than\r
+by intentions.\r
+\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• a shell, a loop, two providers, four\r
+  tools\r
+• wrap to the terminal width, never to a\r
+  guess\r
+\r
+\e[1mThe seam\e[0m\r
+\r
+1. a shell, a loop, two providers, four\r
+   tools\r
+2. a shell, a loop, two providers, four\r
+   tools\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+Anything measurable gets a budget, and\r
+budgets are enforced by CI rather than\r
+by intentions.\r
+A tugboat's power is rated in \e[1mbollard\e[0m\r
+\e[1mpull\e[0m, and the number is absurd for its\r
+size.\r
+\r
+1. one write per frame, and the row\r
+   count exact\r
+2. one write per frame, and the row\r
+   count exact\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• one write per frame, and the row count\r
+  exact\r
+\r
+1. a shell, a loop, two providers, four\r
+   tools\r
+2. one write per frame, and the row\r
+   count exact\r
+3. a shell, a loop, two providers, four\r
+   tools\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. one write per frame, and the row\r
+   count exact\r
+3. a shell, a loop, two providers, four\r
+   tools\r
+\r
+Anything measurable gets a budget, and\r
+budgets are enforced by CI rather than\r
+by intentions.\r
+A tugboat's power is rated in \e[1mbollard\e[0m\r
+\e[1mpull\e[0m, and the number is absurd for its\r
+size.\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+1. repaint the tail, never the\r
+   scrollback\r
+2. a shell, a loop, two providers, four\r
+   tools\r
+3. a shell, a loop, two providers, four\r
+   tools\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+• repaint the tail, never the scrollback\r
+• one write per frame, and the row count\r
+  exact\r
+• a shell, a loop, two providers, four\r
+  tools\r
+\r
+1. one write per frame, and the row\r
+   count exact\r
+2. wrap to the terminal width, never to\r
+   a guess\r
+3. a shell, a loop, two providers, four\r
+   tools\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. a shell, a loop, two providers, four\r
+   tools\r
+3. wrap to the terminal width, never to\r
+   a guess\r
+\r

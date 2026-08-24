@@ -1,0 +1,21 @@
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m... streaming\e[0m\r
+\r\e[8F\e[0J\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[1mThe seam\e[0m\r
+\r
+\e[2mthe provider hung up mid-stream\e[0m\r

@@ -25,6 +25,8 @@ pub const loop = @import("loop/loop.zig");
 pub const width = @import("render/width.zig");
 pub const markdown = @import("render/markdown.zig");
 pub const renderer = @import("render/renderer.zig");
+pub const cadence = @import("provider/cadence.zig");
+pub const runner = @import("provider/runner.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;
@@ -41,10 +43,15 @@ pub const Queue = queue.Queue;
 pub const Loop = loop.Loop;
 pub const Renderer = renderer.Renderer;
 pub const BlockKind = renderer.BlockKind;
+pub const Cadence = cadence.Cadence;
+pub const Runner = runner.Runner;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("render/counting_writer.zig");
+    _ = @import("render/transcript.zig");
     _ = @import("render/golden.zig");
     _ = @import("render/rows_test.zig");
+    _ = @import("provider/golden.zig");
+    _ = @import("provider/firehose_test.zig");
 }

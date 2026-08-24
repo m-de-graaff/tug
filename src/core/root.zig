@@ -17,8 +17,12 @@ const std = @import("std");
 pub const proto = @import("tugproto");
 pub const bus = @import("bus.zig");
 pub const scheduler = @import("scheduler.zig");
+pub const provider = @import("provider.zig");
+pub const mock = @import("mock.zig");
 pub const Bus = bus.Bus;
 pub const Scheduler = scheduler.Scheduler;
+pub const Provider = provider.Provider;
+pub const Mock = mock.Mock;
 pub const version = @import("version.zig");
 
 test {

@@ -1,0 +1,49 @@
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+\e[2m... streaming\e[0m\r
+\r\e[6F\e[0J\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+1. wrap to the terminal width, never to\r
+   a guess\r
+2. one write per frame, and the row\r
+   count exact\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fe\e[0m\r
+\e[2m... streaming\e[0m\r
+\r\e[10F\e[0J1. wrap to the terminal width, never to\r
+   a guess\r
+2. one write per frame, and the row\r
+   count exact\r
+3. one write per frame, and the row\r
+   count exact\r
+\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• one\r
+\e[2m... streaming\e[0m\r
+\r\e[10F\e[0J\r
+\e[2mpub fn main() !void {\e[0m\r
+\e[2m    // **not bold** inside a fence\e[0m\r
+\e[2m    std.debug.print("ship it\n", .{});\e[0m\r
+\e[2m}\e[0m\r
+\r
+• wrap to the terminal width, never to a\r
+  guess\r
+• one write per frame, and the row count\r
+  exact\r
+• repaint the tail, never the scrollback\r
+\r

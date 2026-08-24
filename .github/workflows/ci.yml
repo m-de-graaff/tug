@@ -122,12 +122,27 @@ jobs:
       - run: zig build
       - run: zig build test
 
+  mock-modes:
+    name: every fault mode behaves
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # A pty, and therefore `Loop.run`'s own body, which no portable unit test
+      # can drive. It is also the only gate that has ever caught a liveness bug
+      # in the loop: both of the ones fixed in Phase 5 need a real producer
+      # thread outrunning a real terminal to appear at all.
+      - run: zig build
+      - run: sh scripts/mock-modes.sh zig-out/bin/tug
+
   # --- the meta-gate ------------------------------------------------------
 
   wall-clock:
     name: ci under 5 min
     runs-on: ubuntu-24.04
-    needs: [fmt, no-network, test, wasm, size, version-latency, windows-compile]
+    needs: [fmt, no-network, test, wasm, size, version-latency, windows-compile, mock-modes]
     if: always()
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
