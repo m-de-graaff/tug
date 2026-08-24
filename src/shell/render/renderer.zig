@@ -27,6 +27,7 @@ const std = @import("std");
 const backend = @import("../term/backend.zig");
 const caps_mod = @import("../term/caps.zig");
 const md = @import("markdown.zig");
+const prompt_mod = @import("prompt.zig");
 const width_mod = @import("width.zig");
 
 pub const Size = backend.Size;
@@ -34,10 +35,19 @@ pub const Capabilities = caps_mod.Capabilities;
 
 pub const BlockKind = enum { user, assistant, notice };
 
+pub const Prompt = prompt_mod.Prompt;
+
 /// What one paint put on screen. `committed_rows` have gone into scrollback and
 /// will never be repainted; `tail_rows` are the ones the next paint moves back
-/// over.
-pub const Frame = struct { committed_rows: u32 = 0, tail_rows: u32 = 0 };
+/// over. `cursor_row` and `cursor_col` are where the cursor was left inside the
+/// tail, and are zero when there is no prompt — in which case it parks below
+/// the tail as it has since Phase 4.
+pub const Frame = struct {
+    committed_rows: u32 = 0,
+    tail_rows: u32 = 0,
+    cursor_row: u32 = 0,
+    cursor_col: u16 = 0,
+};
 
 pub const Error = std.Io.Writer.Error || std.mem.Allocator.Error;
 
@@ -58,13 +68,6 @@ const min_cols: usize = 2;
 /// tracking absolute columns through a soft wrap; expanding here means the wrap
 /// arithmetic and the screen agree, which is the thing that must not drift.
 const tab_width: usize = 4;
-
-/// C0, DEL, and the C1 block. Everything a terminal acts on rather than draws,
-/// and therefore everything the renderer must never pass through: each one
-/// either moves the cursor or opens a sequence, and both put the row count out.
-fn isControl(codepoint: u21) bool {
-    return codepoint < 0x20 or (codepoint >= 0x7f and codepoint < 0xa0);
-}
 
 fn isPlain(style: md.Style) bool {
     return @as(u8, @bitCast(style)) == 0;
@@ -153,7 +156,15 @@ pub const Renderer = struct {
     /// on the next paint no matter how much room is left.
     closed_lines: usize = 0,
 
+    /// The draft, when one is being edited. Borrowed: valid from the
+    /// `setPrompt` that installed it until the next one, which in practice
+    /// means the session sets it immediately before each paint.
+    prompt: ?Prompt = null,
+
     tail_rows: u32 = 0,
+    /// How many rows above the parking row the last frame left the cursor. The
+    /// next frame's rewind is short by exactly this much (`DR-011`).
+    cursor_up: u32 = 0,
     painted: bool = false,
     /// The width the last frame was drawn at. A frame drawn at a different one
     /// cannot trust its own row count — see `paint`.
@@ -182,6 +193,31 @@ pub const Renderer = struct {
     /// has no way to observe.
     pub fn setSize(self: *Renderer, size: Size) void {
         self.size = size;
+    }
+
+    /// Installs or removes the draft. Null means the session is not accepting
+    /// input, and the tail ends where the content does.
+    pub fn setPrompt(self: *Renderer, value: ?Prompt) void {
+        self.prompt = value;
+    }
+
+    /// Replaces the capability set. Called once, after the probe: the first
+    /// paint happens before the probe so the prompt is on screen inside the
+    /// 10 ms budget, and the probe's answers arrive a frame later.
+    pub fn setCaps(self: *Renderer, value: Capabilities) void {
+        self.caps = value;
+    }
+
+    /// Clears the screen and forgets the tail.
+    ///
+    /// Not a repaint: it erases and then lets the next frame draw from the top,
+    /// which is why `painted` goes false. The tail's *content* survives — this
+    /// clears the screen, not the conversation.
+    pub fn clearScreen(self: *Renderer, out: *std.Io.Writer) Error!void {
+        try out.writeAll("\x1b[H\x1b[2J");
+        self.painted = false;
+        self.tail_rows = 0;
+        self.cursor_up = 0;
     }
 
     pub fn beginBlock(self: *Renderer, kind: BlockKind) Error!void {
@@ -310,6 +346,13 @@ pub const Renderer = struct {
         const hint = self.block != null;
         if (hint) tail_total += try self.renderHint(null);
 
+        // Measured before the aging loop, because the prompt is part of the
+        // tail and content has to age out into scrollback to make room for it.
+        if (self.prompt) |draft| {
+            const measured = try prompt_mod.render(draft, self.size.cols, capacity, null);
+            tail_total += measured.rows;
+        }
+
         // Age lines out of the tail from the front until what is left fits on
         // screen. Closed blocks age out whole: that is the commit rule.
         var commit_count = self.closed_lines;
@@ -338,9 +381,19 @@ pub const Renderer = struct {
         // cost is the tail appearing twice across a resize. The alternative is
         // erasing something that cannot be redrawn.
         const reflowed = self.painted and self.painted_cols != self.size.cols;
+        if (self.painted and reflowed and self.cursor_up > 0) {
+            // The cursor is parked inside the tail, and a reflowed tail is
+            // abandoned rather than erased. Step down to the parking row first
+            // or the new frame lands on top of the old prompt.
+            try out.print("\x1b[{d}E", .{self.cursor_up});
+        }
         if (self.painted and !reflowed) {
             try out.writeAll("\r");
-            if (self.tail_rows > 0) try out.print("\x1b[{d}F", .{self.tail_rows});
+            // Short by however far up the last frame left the cursor. CPL from
+            // the parking row is what the arithmetic assumes, and the cursor is
+            // no longer there.
+            const back = self.tail_rows - self.cursor_up;
+            if (back > 0) try out.print("\x1b[{d}F", .{back});
             try out.writeAll("\x1b[0J");
         }
 
@@ -356,11 +409,26 @@ pub const Renderer = struct {
         frame.tail_rows += try self.renderPartial(out);
         if (hint) frame.tail_rows += try self.renderHint(out);
 
+        if (self.prompt) |draft| {
+            const placed = try prompt_mod.render(draft, self.size.cols, capacity, out);
+            frame.tail_rows += placed.rows;
+            frame.cursor_row = placed.cursor_row;
+            frame.cursor_col = placed.cursor_col;
+
+            // Inside the synchronized-output window on purpose: a terminal that
+            // honours it should never show the cursor at the parking row.
+            // `rows - cursor_row` is at least one, because the cursor is always
+            // on a row that was emitted.
+            try out.print("\x1b[{d}F", .{placed.rows - placed.cursor_row});
+            if (placed.cursor_col > 0) try out.print("\x1b[{d}C", .{placed.cursor_col});
+        }
+
         if (self.caps.synchronized_output) try out.writeAll("\x1b[?2026l");
 
         self.dropCommitted(commit_count);
         self.closed_lines = 0;
         self.tail_rows = frame.tail_rows;
+        self.cursor_up = if (self.prompt == null) 0 else frame.tail_rows - frame.cursor_row;
         self.painted = true;
         self.painted_cols = self.size.cols;
         return frame;
@@ -545,7 +613,7 @@ pub const Renderer = struct {
                 const codepoint = std.unicode.utf8Decode(slice) catch
                     std.unicode.replacement_character;
 
-                if (isControl(codepoint)) {
+                if (prompt_mod.isControl(codepoint)) {
                     // Control characters never reach the terminal. A text delta
                     // is whatever a provider chose to send, and a raw ESC in it
                     // is an escape-sequence injection into the user's terminal —
@@ -1248,4 +1316,159 @@ test "inline markers in a half-arrived line stay literal until the line ends" {
     var sink2: [4096]u8 = undefined;
     const closed = try paintOnce(&renderer, &buffer2, &sink2);
     try testing.expect(std.mem.indexOf(u8, closed.output, "\x1b[1mbold\x1b[0m text") != null);
+}
+
+test "a prompt is drawn under the tail and the cursor is left inside it" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+
+    renderer.setPrompt(.{ .text = "hi", .cursor = 2 });
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const first = try paintOnce(&renderer, &buffer, &sink);
+
+    try testing.expectEqual(@as(u32, 1), first.frame.tail_rows);
+    try testing.expect(std.mem.indexOf(u8, first.output, "> hi") != null);
+    // One row of prompt, cursor on its only row: one row above the parking row.
+    try testing.expect(std.mem.endsWith(u8, first.output, "\x1b[1F\x1b[4C"));
+
+    // The next frame moves back `tail_rows - cursor_up` rows, which is zero
+    // here: the cursor is already on the tail's top row.
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const second = try paintOnce(&renderer, &buffer2, &sink2);
+    try testing.expect(std.mem.startsWith(u8, second.output, "\r\x1b[0J"));
+}
+
+test "content above a prompt commits and leaves the prompt alone in the tail" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("hello\n");
+    try renderer.endBlock();
+    renderer.setPrompt(.{ .text = "", .cursor = 0 });
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const first = try paintOnce(&renderer, &buffer, &sink);
+
+    // The closed block commits, so only the prompt is left in the tail.
+    try testing.expectEqual(@as(u32, 1), first.frame.committed_rows);
+    try testing.expectEqual(@as(u32, 1), first.frame.tail_rows);
+    try testing.expectEqual(@as(u32, 0), first.frame.cursor_row);
+    try testing.expectEqual(@as(u16, 2), first.frame.cursor_col);
+}
+
+test "a multi-row prompt parks the cursor on the right row" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+
+    // Three rows, cursor at the end of the first.
+    renderer.setPrompt(.{ .text = "one\ntwo\nthree", .cursor = 3 });
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const first = try paintOnce(&renderer, &buffer, &sink);
+
+    try testing.expectEqual(@as(u32, 3), first.frame.tail_rows);
+    try testing.expectEqual(@as(u32, 0), first.frame.cursor_row);
+    // Three rows below the cursor's row, counting the parking row.
+    try testing.expect(std.mem.endsWith(u8, first.output, "\x1b[3F\x1b[5C"));
+
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const second = try paintOnce(&renderer, &buffer2, &sink2);
+    // tail_rows 3 minus cursor_up 3: the cursor is already at the top.
+    try testing.expect(std.mem.startsWith(u8, second.output, "\r\x1b[0J"));
+}
+
+test "a resize steps down out of the prompt before abandoning the old tail" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+
+    renderer.setPrompt(.{ .text = "one\ntwo", .cursor = 0 });
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    _ = try paintOnce(&renderer, &buffer, &sink);
+
+    renderer.setSize(.{ .cols = 12, .rows = 10 });
+
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const second = try paintOnce(&renderer, &buffer2, &sink2);
+
+    // Two rows of prompt with the cursor on the first: two rows to step down.
+    // No erase, because the old tail is abandoned rather than repainted over.
+    try testing.expect(std.mem.startsWith(u8, second.output, "\x1b[2E"));
+    try testing.expect(std.mem.indexOf(u8, second.output, "\x1b[0J") == null);
+}
+
+test "clearing the screen forgets the tail rather than moving over it" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+
+    renderer.setPrompt(.{ .text = "hi", .cursor = 2 });
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    _ = try paintOnce(&renderer, &buffer, &sink);
+
+    var cleared: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&cleared);
+    try renderer.clearScreen(&writer);
+    try testing.expectEqualStrings("\x1b[H\x1b[2J", writer.buffered());
+
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const after = try paintOnce(&renderer, &buffer2, &sink2);
+    // Nothing to move back over: the screen is empty.
+    try testing.expect(std.mem.indexOf(u8, after.output, "\x1b[0J") == null);
+    try testing.expect(std.mem.indexOf(u8, after.output, "> hi") != null);
+}
+
+test "a prompt taller than the tail is capped at the capacity" {
+    // Six rows of screen, so `capacity` is four.
+    const small: Capabilities = .{
+        .color = .none,
+        .kitty_keyboard = false,
+        .synchronized_output = false,
+        .bracketed_paste = true,
+        .size = .{ .cols = 20, .rows = 6 },
+    };
+    var renderer: Renderer = .init(testing.allocator, small, small.size);
+    defer renderer.deinit();
+
+    renderer.setPrompt(.{ .text = "a\nb\nc\nd\ne\nf", .cursor = 11 });
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+
+    try testing.expectEqual(@as(u32, 4), painted.frame.tail_rows);
+    // The window ends on the cursor, so the last line is on screen and the
+    // first is not.
+    try testing.expect(std.mem.indexOf(u8, painted.output, "f") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "> a") == null);
+}
+
+test "no prompt leaves every frame exactly as Phase 4 drew it" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("hello\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    _ = try paintOnce(&renderer, &buffer, &sink);
+
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const second = try paintOnce(&renderer, &buffer2, &sink2);
+
+    // The cursor never left the parking row, so the rewind is the full count.
+    try testing.expect(std.mem.startsWith(u8, second.output, "\r\x1b[2F\x1b[0J"));
+    try testing.expectEqual(@as(u32, 0), second.frame.cursor_row);
 }
