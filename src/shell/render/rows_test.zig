@@ -17,6 +17,7 @@ const testing = std.testing;
 const Counting = @import("counting_writer.zig").Counting;
 const renderer_mod = @import("renderer.zig");
 const Renderer = renderer_mod.Renderer;
+const width_mod = @import("width.zig");
 
 /// Deliberately adversarial: markers that may or may not close, a fence toggle,
 /// wide characters, a combining mark, an emoji, control bytes, and enough
@@ -40,6 +41,45 @@ fn countRows(frame: []const u8) u32 {
         index = at + 2;
     }
     return rows;
+}
+
+/// The widest row in a frame, in display cells, with escape sequences and the
+/// leading carriage return taken out.
+///
+/// This is the invariant underneath every other one here. A row wider than the
+/// terminal is soft-wrapped by the terminal into two, and nothing the renderer
+/// counts will ever know: `countRows` sees the `\r\n` it emitted, the frame
+/// reports that number, and they agree with each other while both disagree with
+/// the screen. Every row-accounting bug this file did not catch was one of
+/// these — an unwrapped status hint, a list marker wider than the terminal, a
+/// wide character admitted to a row that could not hold it.
+fn widestRow(frame: []const u8) usize {
+    var widest: usize = 0;
+    var rows = std.mem.splitSequence(u8, frame, "\r\n");
+    while (rows.next()) |row| {
+        var width: usize = 0;
+        var index: usize = 0;
+        while (index < row.len) {
+            if (row[index] == 0x1b) {
+                // CSI: parameters and intermediates, then a final byte.
+                index += 1;
+                if (index < row.len and row[index] == '[') index += 1;
+                while (index < row.len and (row[index] < 0x40 or row[index] > 0x7e)) index += 1;
+                if (index < row.len) index += 1;
+                continue;
+            }
+            if (row[index] == '\r') {
+                index += 1;
+                continue;
+            }
+            const length = std.unicode.utf8ByteSequenceLength(row[index]) catch 1;
+            const end = @min(index + length, row.len);
+            width += width_mod.stringWidth(row[index..end]);
+            index = end;
+        }
+        widest = @max(widest, width);
+    }
+    return widest;
 }
 
 /// The cursor-up count a frame opens with, or null when it has none.
@@ -123,6 +163,10 @@ test "reported rows are emitted rows, and each frame moves back over exactly the
             }
             previous_tail = frame.tail_rows;
             previous_cols = renderer.size.cols;
+
+            // No row is wider than the terminal, so the terminal never wraps a
+            // row behind the renderer's back.
+            try testing.expect(widestRow(output) <= @max(2, renderer.size.cols));
 
             // The tail fits on screen, or the cursor-up cannot reach its top.
             // Below three rows there is nowhere for the status hint and the
