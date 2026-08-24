@@ -137,12 +137,27 @@ jobs:
       - run: zig build
       - run: sh scripts/mock-modes.sh zig-out/bin/tug
 
+  editor-session:
+    name: the editor behaves
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # A pty, and therefore the editor as a user meets it: keystrokes through a
+      # real terminal, a turn started and interrupted, and a history file that
+      # outlives the process that wrote it. The in-process goldens pin the
+      # bytes; this pins the behaviour they cannot see.
+      - run: zig build
+      - run: sh scripts/editor-session.sh zig-out/bin/tug
+
   # --- the meta-gate ------------------------------------------------------
 
   wall-clock:
     name: ci under 5 min
     runs-on: ubuntu-24.04
-    needs: [fmt, no-network, test, wasm, size, version-latency, windows-compile, mock-modes]
+    needs: [fmt, no-network, test, wasm, size, version-latency, windows-compile, mock-modes, editor-session]
     if: always()
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

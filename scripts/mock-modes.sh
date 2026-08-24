@@ -12,6 +12,9 @@
 # depends on TERM, the window size and the capability probe's timing, and a
 # byte-exact assertion over that is a flaky test wearing a golden's clothes.
 #
+# `--once` is what makes each mode end on its own: without it `--provider mock`
+# opens a shell, and a shell waits for a keypress rather than exiting.
+#
 # Requires a POSIX system with a pty. Skips itself elsewhere rather than
 # pretending to pass.
 #
@@ -34,7 +37,7 @@ trap 'rm -f "$capture" "$first"' EXIT
 run() {
     label=$1
     shift
-    if ! timeout 60 script -qec "$binary --provider mock --mock-seed 1 $*" /dev/null \
+    if ! timeout 60 script -qec "$binary --provider mock --once --mock-seed 1 $*" /dev/null \
         >"$capture" 2>&1; then
         printf 'mock-modes: %s did not exit cleanly\n' "$label" >&2
         exit 1
@@ -104,7 +107,7 @@ frame_budget=$((window * 156))
 # `timeout` returns 124 when it does the killing, which is the expected result
 # here. Any other non-zero status is the binary falling over.
 timeout "$window" script -qec \
-    "$binary --provider mock --mock-seed 1 --mock-fault firehose" /dev/null \
+    "$binary --provider mock --once --mock-seed 1 --mock-fault firehose" /dev/null \
     >"$capture" 2>&1 || [ $? -eq 124 ] || {
     echo "mock-modes: firehose exited badly" >&2
     exit 1

@@ -172,6 +172,59 @@ client before this phase replaced it; `--provider mock` is the replacement, with
 Cost: 7,032 bytes, taking the binary to 139,592 of the 500 KiB budget. Tests go
 from 140 to 184.
 
+### Milestone 3 «It edits» — Phase 6
+
+**Phase 6, the editor.** `tug` opens a prompt instead of printing its usage. The
+draft is a byte buffer with a codepoint cursor and one kill slot; the emacs set,
+multiline editing, and history navigation all reach it through a layer of named
+actions rather than through key comparisons, which is the seam Phase 8 rebinds.
+`repl.zig` contains no `KeyEvent` comparison outside its tests, and that is a
+grep rather than a claim.
+
+`--provider mock` answers every submission, one provider thread per turn, joined
+when the turn ends. That is the milestone demo: type, submit, watch a response
+stream into scrollback, get the prompt back underneath it.
+
+**The renderer learned where the cursor is** (`DR-011`). A frame records how far
+above its parking row it left the caret, and the next frame's rewind is short by
+exactly that much. The prompt is hard-wrapped at the column where the rest of
+the tail wraps at spaces — word wrap moves the character under your cursor to
+another row while you are typing the word in front of it — and a draft taller
+than the tail is windowed on the cursor rather than truncated. With no prompt on
+screen the offset is zero and every Phase 4 and Phase 5 golden still matches
+byte for byte, which is how the change was kept to its own path.
+
+**History** is one entry per line in the XDG state directory, with backslash and
+newline escaped so a multiline draft stays one line in the file (`DR-012`).
+Appends are a length plus a positional write, because this standard library has
+no append mode and no seek. Nothing is read until the first press of `up`.
+Every filesystem error is swallowed: a shell that refused to start because
+`$HOME` was read-only would be the worse bug.
+
+**`--provider mock` changed meaning**, and it is the only breaking change in the
+phase. It used to stream one turn and exit; it now opens a shell. `--once` is
+the one-turn path, and it is what `scripts/mock-modes.sh` runs on.
+
+**Fixed after the fact.** Two defects that needed an editor to be visible at
+all. `enterRaw` used `TCSAFLUSH`, which discards input that has arrived and not
+been read — everything typed between the process starting and raw mode engaging
+was thrown away by the terminal driver. And the capability probe swallowed
+whatever it read that was not a reply, which on a terminal that answers neither
+query is a 50 ms window with a keystroke in it. Both were found by driving the
+real binary through a pty, and neither was reachable from a unit test.
+
+**Corrected while building it.** The vertical goal column is sticky: recomputing
+it from the cursor on every press makes the caret drift left through short
+lines, permanently.
+
+`scripts/editor-session.sh` drives a real session through a pty in CI —
+keystrokes, two turns, an interrupt, and a history file read back by a second
+process. The in-process goldens under `src/shell/edit/golden.zig` pin the bytes;
+the script pins the behaviour they cannot see.
+
+Cost: 15,992 bytes, taking the binary to 155,584 — 30 % of the 500 KiB budget.
+Tests go from 185 to 261.
+
 ### Not yet
 
 The editor, config, keymaps, themes and commands — Phases 6
