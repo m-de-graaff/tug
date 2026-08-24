@@ -53,7 +53,8 @@ const usage =
     \\  -V, --version    Print the version and exit.
     \\
     \\provider:
-    \\  --provider mock    Stream a seeded mock response and exit.
+    \\  --provider mock    Answer each turn with a seeded mock response.
+    \\  --once             Stream one turn and exit, instead of opening a shell.
     \\  --mock-seed N      Seed the mock (default 0). Same seed, same bytes.
     \\  --mock-cadence C   normal | instant | firehose
     \\  --mock-fault F     none | stall[=ms] | midstream_error | oversized_chunk
@@ -67,8 +68,17 @@ const usage =
 
 const Command = enum { help, version, caps, debug_keys, mock, shell };
 
+/// Which provider answers a turn. An enum rather than a bool because v0.2 adds
+/// two more and this is where they will land.
+const Provider = enum { none, mock };
+
 const Options = struct {
     command: Command = .shell,
+    provider: Provider = .none,
+    /// Stream one turn and exit, instead of opening the shell. The fault
+    /// harness runs on this: every mode has to end on its own, and a shell that
+    /// waits for a keypress never does.
+    once: bool = false,
     mock: core.mock.Config = .{},
     cadence: shell.cadence.Preset = .normal,
 };
@@ -101,7 +111,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return stdout.flush();
         },
         .help => {
-            try stdout.writeAll(usage);
+            try printUsage(stdout);
             return stdout.flush();
         },
         .caps => {
@@ -117,11 +127,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
             options,
         ),
         .shell => {
-            // Phase 6 onward. Until the editor exists there is nothing to drop
-            // the user into, and pretending otherwise would be worse than
-            // saying so.
-            try stdout.writeAll(usage);
-            return stdout.flush();
+            const environment = readEnvironment(init.environ, environment_allocator.allocator());
+            const history_path = try shell.history.resolvePath(
+                environment_allocator.allocator(),
+                environment.state,
+                builtin.os.tag == .windows,
+            );
+            return shell.repl.run(
+                // The shell is the first thing in tug that lives longer than a
+                // turn, and the editor, the history and the renderer all
+                // allocate. A general-purpose allocator is what a process that
+                // may run for hours wants; Phase 11's DebugAllocator gate over a
+                // 1,000-interaction session is what will police it.
+                std.heap.smp_allocator,
+                io,
+                stdout,
+                .{
+                    .env = environment.caps,
+                    .history_path = history_path,
+                    .provider = switch (options.provider) {
+                        .none => null,
+                        .mock => .{ .mock = options.mock, .cadence = options.cadence },
+                    },
+                },
+            );
         },
     }
 }
@@ -145,9 +174,11 @@ fn parseArgs(argv: []const [:0]const u8) Options {
         if (eqlAny(arg, &.{"--caps"})) return .{ .command = .caps };
         if (eqlAny(arg, &.{"--debug-keys"})) return .{ .command = .debug_keys };
 
-        if (eqlAny(arg, &.{"--provider"})) {
+        if (eqlAny(arg, &.{"--once"})) {
+            options.once = true;
+        } else if (eqlAny(arg, &.{"--provider"})) {
             if (value) |name| {
-                if (std.mem.eql(u8, name, "mock")) options.command = .mock;
+                if (std.mem.eql(u8, name, "mock")) options.provider = .mock;
                 index += 1;
             }
         } else if (eqlAny(arg, &.{"--mock-seed"})) {
@@ -169,6 +200,9 @@ fn parseArgs(argv: []const [:0]const u8) Options {
     }
 
     options.cadence = shell.cadence.presetFor(options.mock.fault, requested_cadence);
+    // Decided last, because `--once` and `--provider` can arrive in either
+    // order and neither means anything without the other.
+    if (options.provider == .mock and options.once) options.command = .mock;
     return options;
 }
 
@@ -198,24 +232,71 @@ fn printVersion(out: *std.Io.Writer) std.Io.Writer.Error!void {
     try out.writeAll("\n");
 }
 
-/// Reads the environment into the pure `caps.Env` the detector wants.
+/// Everything tug reads from the environment, read once.
+const Environment = struct {
+    caps: shell.caps.Env = .{},
+    state: shell.history.Location = .{},
+};
+
+/// Reads the environment into the pure values the detector and the history want.
 ///
-/// Only these four variables are consulted, and the detector never sees the
-/// environment itself — that separation is what lets the decision logic be
-/// table-tested on a machine with no terminal.
+/// Seven variables, one pass. The detector never sees the environment itself —
+/// that separation is what lets the decision logic be table-tested on a machine
+/// with no terminal — and the same is true of the history path.
 ///
 /// The map is built once and deliberately not deinitialized: the returned
-/// `Env` borrows its strings, and `gpa` is a fixed buffer that outlives every
+/// values borrow its strings, and `gpa` is a fixed buffer that outlives every
 /// use of them. Freeing here would hand back dangling slices.
-fn readEnv(environ: std.process.Environ, gpa: std.mem.Allocator) shell.caps.Env {
+fn readEnvironment(environ: std.process.Environ, gpa: std.mem.Allocator) Environment {
     var map = environ.createMap(gpa) catch return .{};
     return .{
-        // Presence is the signal; the value is explicitly irrelevant.
-        .no_color = map.get("NO_COLOR") != null,
-        .colorterm = map.get("COLORTERM"),
-        .term = map.get("TERM"),
-        .tmux = map.get("TMUX") != null,
+        .caps = .{
+            // Presence is the signal; the value is explicitly irrelevant.
+            .no_color = map.get("NO_COLOR") != null,
+            .colorterm = map.get("COLORTERM"),
+            .term = map.get("TERM"),
+            .tmux = map.get("TMUX") != null,
+        },
+        .state = .{
+            .xdg_state_home = map.get("XDG_STATE_HOME"),
+            .home = map.get("HOME"),
+            .local_app_data = map.get("LOCALAPPDATA"),
+        },
     };
+}
+
+/// The usage text plus the live keymap.
+///
+/// Generated from `actions.bindings` rather than written out, so a binding
+/// added in Phase 8 cannot be missing from the help. Phase 10's `/keys` is the
+/// richer version of this — grouped, with the config layer that set each one —
+/// and it consumes the same table.
+fn printUsage(out: *std.Io.Writer) std.Io.Writer.Error!void {
+    try out.writeAll(usage);
+    try out.writeAll("keys:\n");
+
+    for (shell.actions.bindings) |binding| {
+        var chord_buffer: [32]u8 = undefined;
+        var chord_writer: std.Io.Writer = .fixed(&chord_buffer);
+        binding.chord.writeChord(&chord_writer) catch {};
+        const chord = chord_writer.buffered();
+
+        try out.writeAll("  ");
+        try out.writeAll(chord);
+        // Padded by hand rather than with a width specifier, because a chord
+        // can contain a multi-byte character and a byte-counted width would
+        // misalign the column it exists to align.
+        var pad = shell.width.stringWidth(chord);
+        while (pad < 16) : (pad += 1) try out.writeAll(" ");
+
+        try out.writeAll(shell.actions.help(binding.action));
+        switch (binding.when) {
+            .always => {},
+            .kitty => try out.writeAll(" (kitty keyboard protocol only)"),
+            .legacy => try out.writeAll(" (without the kitty keyboard protocol)"),
+        }
+        try out.writeAll("\n");
+    }
 }
 
 fn printCapabilities(
@@ -238,7 +319,7 @@ fn printCapabilities(
     defer terminal.restore();
 
     const probe = shell.probe.run(io, &terminal);
-    const detected = shell.caps.detect(readEnv(environ, gpa), probe, terminal.size());
+    const detected = shell.caps.detect(readEnvironment(environ, gpa).caps, probe, terminal.size());
     try detected.write(out);
     try out.print("probe timeout      {d} ms\n", .{shell.modes.probe_timeout_ms});
 }
@@ -270,7 +351,7 @@ fn debugKeys(
     defer stack.popAll(screen);
 
     const probe = shell.probe.run(io, &terminal);
-    const detected = shell.caps.detect(readEnv(environ, gpa), probe, terminal.size());
+    const detected = shell.caps.detect(readEnvironment(environ, gpa).caps, probe, terminal.size());
 
     if (detected.bracketed_paste) try stack.push(screen, .bracketed_paste);
     if (detected.kitty_keyboard) try stack.push(screen, .kitty_keyboard);
@@ -415,7 +496,7 @@ fn runMock(
     defer stack.popAll(screen);
 
     const probe = shell.probe.run(io, &terminal);
-    const detected = shell.caps.detect(readEnv(environ, gpa), probe, terminal.size());
+    const detected = shell.caps.detect(readEnvironment(environ, gpa).caps, probe, terminal.size());
 
     var waker: shell.Waker = try .init();
     defer waker.deinit();
@@ -592,11 +673,53 @@ test "commands are recognized and the default is the shell" {
         .{ .args = &.{ "tug", "--help" }, .want = .help },
         .{ .args = &.{ "tug", "--caps" }, .want = .caps },
         .{ .args = &.{ "tug", "--debug-keys" }, .want = .debug_keys },
-        .{ .args = &.{ "tug", "--provider", "mock" }, .want = .mock },
+        // A provider on its own opens the shell; the one-turn path is a flag.
+        .{ .args = &.{ "tug", "--provider", "mock" }, .want = .shell },
+        .{ .args = &.{ "tug", "--provider", "mock", "--once" }, .want = .mock },
     };
     for (cases) |case| {
         try testing.expectEqual(case.want, parseArgs(case.args).command);
     }
+}
+
+test "the provider is remembered whichever command it produced" {
+    const shell_session = parseArgs(&.{ "tug", "--provider", "mock" });
+    try testing.expectEqual(Command.shell, shell_session.command);
+    try testing.expectEqual(Provider.mock, shell_session.provider);
+
+    const one_turn = parseArgs(&.{ "tug", "--provider", "mock", "--once" });
+    try testing.expectEqual(Command.mock, one_turn.command);
+    try testing.expectEqual(Provider.mock, one_turn.provider);
+
+    const bare = parseArgs(&.{"tug"});
+    try testing.expectEqual(Provider.none, bare.provider);
+}
+
+test "once without a provider is still just a shell" {
+    // There is nothing to do once when nothing answers.
+    const options = parseArgs(&.{ "tug", "--once" });
+    try testing.expectEqual(Command.shell, options.command);
+    try testing.expectEqual(Provider.none, options.provider);
+}
+
+test "the flag order does not matter" {
+    const before = parseArgs(&.{ "tug", "--once", "--provider", "mock", "--mock-seed", "7" });
+    try testing.expectEqual(Command.mock, before.command);
+    try testing.expectEqual(@as(u64, 7), before.mock.seed);
+}
+
+test "help lists every binding" {
+    var buffer: [8 * 1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try printUsage(&writer);
+    const text = writer.buffered();
+
+    try testing.expect(std.mem.indexOf(u8, text, "ctrl+a") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "send the draft") != null);
+    // The fallback is annotated rather than left to be discovered by watching a
+    // half-written message send itself (`DR-003`).
+    try testing.expect(std.mem.indexOf(u8, text, "alt+enter") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "kitty") != null);
 }
 
 test "the mock flags parse" {
@@ -606,19 +729,19 @@ test "the mock flags parse" {
         fault: core.mock.Fault = .none,
         cadence: shell.cadence.Preset = .normal,
     }{
-        .{ .args = &.{ "tug", "--provider", "mock" } },
-        .{ .args = &.{ "tug", "--provider", "mock", "--mock-seed", "42" }, .seed = 42 },
+        .{ .args = &.{ "tug", "--provider", "mock", "--once" } },
+        .{ .args = &.{ "tug", "--provider", "mock", "--once", "--mock-seed", "42" }, .seed = 42 },
         .{
-            .args = &.{ "tug", "--provider", "mock", "--mock-fault", "split_utf8" },
+            .args = &.{ "tug", "--provider", "mock", "--once", "--mock-fault", "split_utf8" },
             .fault = .split_utf8,
         },
         .{
-            .args = &.{ "tug", "--provider", "mock", "--mock-cadence", "instant" },
+            .args = &.{ "tug", "--provider", "mock", "--once", "--mock-cadence", "instant" },
             .cadence = .instant,
         },
         // A fault with a timing opinion picks its own cadence.
         .{
-            .args = &.{ "tug", "--provider", "mock", "--mock-fault", "firehose" },
+            .args = &.{ "tug", "--provider", "mock", "--once", "--mock-fault", "firehose" },
             .fault = .firehose,
             .cadence = .firehose,
         },
@@ -633,11 +756,11 @@ test "the mock flags parse" {
 }
 
 test "stall takes an optional millisecond count" {
-    const plain = parseArgs(&.{ "tug", "--provider", "mock", "--mock-fault", "stall" });
+    const plain = parseArgs(&.{ "tug", "--provider", "mock", "--once", "--mock-fault", "stall" });
     try testing.expectEqual(core.mock.Fault.stall, plain.mock.fault);
     try testing.expectEqual(@as(u32, 1500), plain.mock.stall_ms);
 
-    const explicit = parseArgs(&.{ "tug", "--provider", "mock", "--mock-fault", "stall=250" });
+    const explicit = parseArgs(&.{ "tug", "--provider", "mock", "--once", "--mock-fault", "stall=250" });
     try testing.expectEqual(core.mock.Fault.stall, explicit.mock.fault);
     try testing.expectEqual(@as(u32, 250), explicit.mock.stall_ms);
 }
@@ -645,12 +768,14 @@ test "stall takes an optional millisecond count" {
 test "a bad flag value falls back rather than failing" {
     // A debug flag is not a trust boundary, and a typo in one should not stop
     // the shell from starting. An unparsable value keeps the default.
-    const fault = parseArgs(&.{ "tug", "--provider", "mock", "--mock-fault", "explode" });
+    const fault = parseArgs(&.{ "tug", "--provider", "mock", "--once", "--mock-fault", "explode" });
     try testing.expectEqual(core.mock.Fault.none, fault.mock.fault);
-    const seed = parseArgs(&.{ "tug", "--provider", "mock", "--mock-seed", "abc" });
+    const seed = parseArgs(&.{ "tug", "--provider", "mock", "--once", "--mock-seed", "abc" });
     try testing.expectEqual(@as(u64, 0), seed.mock.seed);
 }
 
 test "an unknown provider is not the mock" {
-    try testing.expectEqual(Command.shell, parseArgs(&.{ "tug", "--provider", "anthropic" }).command);
+    const options = parseArgs(&.{ "tug", "--provider", "anthropic", "--once" });
+    try testing.expectEqual(Command.shell, options.command);
+    try testing.expectEqual(Provider.none, options.provider);
 }
