@@ -114,9 +114,67 @@ what fits.
 Cost: 13,848 bytes, taking the binary to 132,560 of the 500 KiB budget. Tests
 go from 76 to 140.
 
+**Phase 5, the mock provider.** A seeded generator in `tugcore` and a cadence
+engine in `tugshell`, either side of the interface v0.2's real providers will
+satisfy. A provider is a blocking iterator of `StreamEvent` and nothing else —
+an erased context and one function pointer, the same shape the bus already uses
+for subscribers. The mock is its first tenant; the seam is the deliverable.
+
+The generator is deterministic to the byte: the same seed produces the same
+response on every platform and in every optimize mode, because the only source
+of variety is a Xoshiro256 draw over a fixed corpus. It decides *what* is said.
+The cadence engine, one layer out where the clock lives, decides how fast it
+arrives and where it is cut — the part a real provider will get from the network
+instead.
+
+Seven named fault modes: `stall`, `midstream_error`, `oversized_chunk`,
+`split_utf8`, `instant`, `firehose` and `empty`. Two are honoured in the core
+and the rest in the cadence engine, because a fault about timing or chunk
+boundaries cannot be expressed by a module with no clock. Each has a golden
+transcript, driven by the real mock through the real cadence into the real
+renderer.
+
+Nothing in the loop or the renderer changed to make this work, which is the
+claim Phases 3 and 4 were making and this is the first thing to test it. What
+did change is the cross-thread queue: a queued payload's slice was borrowed, and
+the producer's buffer is reused for the next chunk long before the loop drains
+it. Slots now own their bytes — `push` copies in, `pop` copies out, 512 bytes a
+slot and 64 slots (`DR-010`). A payload larger than a slot is refused rather
+than truncated, and splitting one costs nothing, because a delta cut in two is
+two deltas.
+
+**Two liveness bugs, both latent since Phase 3, both found by the firehose.**
+Each showed the same way: one frame painted and then a process that looked hung.
+The waker lost wakeups — `drain` cleared its pending flag before the read, so a
+byte written in that window was collected by that read while the flag stayed
+set, after which every `wake` was suppressed as redundant and the loop sat in
+`poll` forever. And the queue drain never returned: looping until `pop` comes
+back empty is a livelock against any producer that refills the ring mid-drain,
+and a loop that never leaves its drain never reaches the paint the frame budget
+is expressed in. Ten seconds of firehose on a pty went from 8 KB and zero
+repaints to 2.4 MB and seventy.
+
+Both fixes have a test that fails without them. Neither bug is reachable
+without a producer faster than the terminal, which is precisely what the fault
+mode exists to be.
+
+The frame budget itself now has a number rather than an assertion: half a second
+of a real provider thread pushing as fast as the queue will take it paints 37
+times in Debug and 34 in ReleaseSafe, against a ceiling of 66. Painting on every
+drain instead gives 85, so the test discriminates rather than merely passing.
+`scripts/mock-modes.sh` runs each mode through a real pty in CI — the only gate
+that exercises `Loop.run`'s own body, which no portable unit test can drive.
+
+`--debug-render` is gone. It was documented in Phase 4 as the last hardcoded
+client before this phase replaced it; `--provider mock` is the replacement, with
+`--mock-seed`, `--mock-cadence` and `--mock-fault` beside it.
+
+Cost: 7,032 bytes, taking the binary to 139,592 of the 500 KiB budget. Tests go
+from 140 to 184.
+
 ### Not yet
 
-The mock provider, the editor, config, keymaps, themes and commands — Phases 5
+The editor, config, keymaps, themes and commands — Phases 6
 to 11. `tug` with no arguments prints its usage rather than pretending to be a
 shell. And no terminal emulator has yet watched the renderer stream: the
 no-flicker eyeball test in kitty and alacritty is Phase 4's stated exit
