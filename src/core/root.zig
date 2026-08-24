@@ -15,6 +15,10 @@
 const std = @import("std");
 
 pub const proto = @import("tugproto");
+pub const bus = @import("bus.zig");
+pub const scheduler = @import("scheduler.zig");
+pub const Bus = bus.Bus;
+pub const Scheduler = scheduler.Scheduler;
 pub const version = @import("version.zig");
 
 test {

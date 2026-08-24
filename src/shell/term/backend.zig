@@ -59,12 +59,20 @@ pub const Backend = struct {
         return self.inner.size();
     }
 
+    /// The handle to wait on for input readability. On POSIX this is the
+    /// terminal's file descriptor; on Windows it is the console input handle,
+    /// which is not a descriptor at all — which is why the loop asks the
+    /// backend rather than assuming fd 0.
+    pub fn handle(self: *Backend) Handle {
+        return self.inner.handle();
+    }
+
     /// The fd a resize notification is written to. On POSIX the `SIGWINCH`
     /// handler writes one byte here and does nothing else, which is all an
     /// async-signal-safe handler is allowed to do. Windows has no equivalent
     /// signal, so the backend polls instead.
-    pub fn setWakeHandle(self: *Backend, handle: Handle) void {
-        self.inner.setWakeHandle(handle);
+    pub fn setWakeHandle(self: *Backend, wake_handle: Handle) void {
+        self.inner.setWakeHandle(wake_handle);
     }
 
     /// A writer onto the terminal. Everything the renderer emits goes through

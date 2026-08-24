@@ -128,11 +128,15 @@ pub const Impl = struct {
         return .{ .cols = @intCast(cols), .rows = @intCast(rows) };
     }
 
-    pub fn setWakeHandle(self: *Impl, handle: Handle) void {
+    pub fn setWakeHandle(self: *Impl, handle_value: Handle) void {
         _ = self;
-        _ = handle;
+        _ = handle_value;
         // No SIGWINCH to forward. Resize is discovered by comparing `size()`
         // against the last known one when the loop wakes for any other reason.
+    }
+
+    pub fn handle(self: *Impl) Handle {
+        return self.input;
     }
 
     pub fn writer(self: *Impl, io: std.Io, buffer: []u8) std.Io.File.Writer {

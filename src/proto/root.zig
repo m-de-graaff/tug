@@ -18,6 +18,7 @@ pub const StopReason = stream.StopReason;
 pub const Err = stream.Err;
 pub const ErrKind = stream.ErrKind;
 pub const Event = events.Event;
+pub const Payload = events.Payload;
 
 test {
     @import("std").testing.refAllDecls(@This());

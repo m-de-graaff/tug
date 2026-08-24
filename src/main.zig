@@ -173,9 +173,11 @@ fn printCapabilities(
 
 /// Asks the terminal what it supports, and takes silence for an answer.
 ///
-/// ponytail: both probes share one read window rather than one each, so a
-/// terminal that answers the first and not the second costs one timeout rather
-/// than two. Split them if a terminal ever turns up that reorders replies.
+/// Every read is gated on `wait`, because a terminal that supports neither
+/// protocol answers neither query and the descriptor is in raw mode with
+/// `VMIN=1`: a read that is not gated never returns. The whole budget is spent
+/// once rather than once per query, so a terminal that answers the first and
+/// not the second costs one timeout rather than two.
 fn probeCapabilities(io: std.Io, terminal: *shell.Backend) shell.caps.Probe {
     var write_buffer: [64]u8 = undefined;
     var terminal_writer = terminal.writer(io, &write_buffer);
@@ -188,15 +190,50 @@ fn probeCapabilities(io: std.Io, terminal: *shell.Backend) shell.caps.Probe {
     var read_buffer: [256]u8 = undefined;
     var terminal_reader = terminal.reader(io, &read_buffer);
 
-    // A terminal that supports neither replies to neither, so this read is
-    // expected to come back empty and must not be allowed to block.
-    const reply = terminal_reader.interface.peekGreedy(1) catch return .{};
+    var reply_buffer: [256]u8 = undefined;
+    var reply_len: usize = 0;
+    const deadline = shell.waiting.nowMs(io) + shell.modes.probe_timeout_ms;
 
+    while (reply_len < reply_buffer.len) {
+        const now = shell.waiting.nowMs(io);
+        if (now >= deadline) break;
+
+        const remaining: u32 = @intCast(deadline - now);
+        const ready = shell.waiting.wait(terminal.handle(), null, remaining) catch break;
+        if (!ready.input) break;
+
+        const chunk = terminal_reader.interface.peekGreedy(1) catch break;
+        if (chunk.len == 0) break;
+
+        const take = @min(chunk.len, reply_buffer.len - reply_len);
+        @memcpy(reply_buffer[reply_len..][0..take], chunk[0..take]);
+        reply_len += take;
+        terminal_reader.interface.toss(chunk.len);
+
+        if (probeRepliesComplete(reply_buffer[0..reply_len])) break;
+    }
+
+    const reply = reply_buffer[0..reply_len];
     return .{
         .kitty_keyboard = std.mem.indexOf(u8, reply, "\x1b[?") != null and
             shell.modes.kittyReplyMeansSupported(firstReply(reply)),
         .synchronized_output = std.mem.indexOf(u8, reply, "2026;") != null,
     };
+}
+
+/// True once both replies are present, so a terminal that answers promptly
+/// costs a round trip rather than the whole 50 ms budget.
+///
+/// The kitty reply is `CSI ? <flags> u` and the synchronized-output reply is
+/// `CSI ? 2026 ; <state> $y`, so `CSI ?` identifies neither of them on its own
+/// — the `u` terminator and the mode number are what tell them apart.
+///
+/// This is only an early exit. Getting it wrong costs the rest of the 50 ms
+/// budget; it can never produce a wrong verdict, because the verdict is read
+/// from the accumulated bytes either way.
+fn probeRepliesComplete(reply: []const u8) bool {
+    return std.mem.indexOf(u8, reply, "2026;") != null and
+        std.mem.indexOfScalar(u8, reply, 'u') != null;
 }
 
 /// The terminal may answer both probes in one read, so split at the second CSI.
@@ -245,33 +282,101 @@ fn debugKeys(
     var decoder: shell.Decoder = .init(&scratch);
     decoder.setKittyActive(detected.kitty_keyboard);
 
-    var read_buffer: [1024]u8 = undefined;
-    var terminal_reader = terminal.reader(io, &read_buffer);
+    // Everything below is the Phase 3 loop with a two-line client hanging off
+    // it. That is the whole point of the phase: the echo is hardcoded, the
+    // machinery under it is not, and Phase 4's renderer replaces `onRender`
+    // without touching anything else.
+    var waker: shell.Waker = try .init();
+    defer waker.deinit();
+    terminal.setWakeHandle(waker.writeHandle());
 
-    while (true) {
-        const chunk = terminal_reader.interface.peekGreedy(1) catch break;
-        if (chunk.len == 0) break;
-        decoder.feed(chunk);
-        terminal_reader.interface.toss(chunk.len);
+    var bus: shell.core.Bus = .{};
+    var queue: shell.Queue = .{};
+    var scheduler: shell.core.Scheduler = .{};
 
-        while (decoder.next()) |event| {
-            switch (event) {
-                .key => |key_event| {
-                    if (key_event.mods.ctrl and key_event.key.eql(.{ .char = 'c' })) {
-                        try screen.writeAll("\r\n");
-                        return screen.flush();
-                    }
-                    try key_event.writeChord(screen);
-                    try screen.writeAll("\r\n");
-                },
-                .paste => |paste| {
-                    try screen.print("paste {d} bytes\r\n", .{paste.bytes.len});
-                },
-            }
-        }
-        try screen.flush();
-    }
+    var echo: KeyEcho = .{
+        .screen = screen,
+        .terminal = &terminal,
+        .last_size = terminal.size(),
+    };
+
+    var loop: shell.Loop = .{
+        .io = io,
+        .terminal = &terminal,
+        .waker = &waker,
+        .queue = &queue,
+        .bus = &bus,
+        .decoder = &decoder,
+        .scheduler = &scheduler,
+        .handlers = .{
+            .context = &echo,
+            .onInput = KeyEcho.onInput,
+            .onRender = KeyEcho.onRender,
+        },
+    };
+
+    try loop.run();
+    try screen.writeAll("\r\n");
+    try screen.flush();
 }
+
+/// The `--debug-keys` client: one line per decoded event, and ctrl+c stops.
+///
+/// Writing happens in `onInput` and flushing in `onRender`, which is not an
+/// accident — it is the same split the renderer will use, so the frame budget
+/// coalesces a burst of keystrokes into one write rather than one per key.
+const KeyEcho = struct {
+    screen: *std.Io.Writer,
+    terminal: *shell.Backend,
+    last_size: shell.Size,
+    failed: ?anyerror = null,
+
+    fn onInput(context: ?*anyopaque, event: shell.InputEvent) shell.loop.Flow {
+        const self: *KeyEcho = @ptrCast(@alignCast(context.?));
+
+        switch (event) {
+            .key => |key_event| {
+                if (key_event.mods.ctrl and key_event.key.eql(.{ .char = 'c' })) return .stop;
+                key_event.writeChord(self.screen) catch |err| {
+                    self.failed = err;
+                    return .stop;
+                };
+                self.screen.writeAll("\r\n") catch |err| {
+                    self.failed = err;
+                    return .stop;
+                };
+            },
+            .paste => |paste| {
+                self.screen.print("paste {d} bytes\r\n", .{paste.bytes.len}) catch |err| {
+                    self.failed = err;
+                    return .stop;
+                };
+            },
+        }
+        return .keep_going;
+    }
+
+    /// Reports a resize as well as flushing.
+    ///
+    /// The size is re-read here rather than carried on the wake, because the
+    /// wake carries nothing: `SIGWINCH` writes one byte and the loop asks the
+    /// terminal what happened. It is also the only Windows-compatible shape,
+    /// since there is no `SIGWINCH` there to carry anything on. Printing it
+    /// makes the phase's "wakes on resize" claim something you can watch rather
+    /// than something the code asserts about itself.
+    fn onRender(context: ?*anyopaque) anyerror!void {
+        const self: *KeyEcho = @ptrCast(@alignCast(context.?));
+        if (self.failed) |err| return err;
+
+        const current = self.terminal.size();
+        if (current.cols != self.last_size.cols or current.rows != self.last_size.rows) {
+            try self.screen.print("resize {d}x{d}\r\n", .{ current.cols, current.rows });
+            self.last_size = current;
+        }
+
+        try self.screen.flush();
+    }
+};
 
 const testing = std.testing;
 
@@ -303,6 +408,18 @@ test "commands are recognized and the default is the shell" {
     for (cases) |case| {
         try testing.expectEqual(case.want, parseCommand(case.args));
     }
+}
+
+test "the probe stops early only once both replies have arrived" {
+    try testing.expect(!probeRepliesComplete(""));
+    try testing.expect(!probeRepliesComplete("\x1b[?3u"));
+
+    // The synchronized-output reply on its own also starts `CSI ?`, so a
+    // marker that only looked for that would call this pair complete.
+    try testing.expect(!probeRepliesComplete("\x1b[?2026;2$y"));
+
+    try testing.expect(probeRepliesComplete("\x1b[?3u\x1b[?2026;2$y"));
+    try testing.expect(probeRepliesComplete("\x1b[?2026;2$y\x1b[?3u"));
 }
 
 test "splitting a combined probe reply keeps the first response" {
