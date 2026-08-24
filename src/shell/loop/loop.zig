@@ -141,7 +141,9 @@ pub const Loop = struct {
     ///
     /// This is `Queue.drainInto` plus the scheduling decision, which the queue
     /// has no business knowing about. `drainInto` stays for callers that only
-    /// want the events.
+    /// want the events, and the bound below is the same one for the same
+    /// reason: a drain that chases a producer faster than itself never returns,
+    /// and a loop that never returns from its drain never paints.
     fn drainQueue(self: *Loop) usize {
         // The buffer a popped payload's bytes are copied into (`DR-010`). One
         // slot's worth, reused across the drain: each payload is published and
@@ -149,13 +151,13 @@ pub const Loop = struct {
         // lifetime the bus documents for a borrowed slice.
         var out: [queue_mod.max_payload_bytes]u8 = undefined;
         var delivered: usize = 0;
-        while (self.queue.pop(self.io, &out)) |payload| {
+        while (delivered < queue_mod.capacity) : (delivered += 1) {
+            const payload = self.queue.pop(self.io, &out) orelse break;
             switch (urgency(payload.event())) {
                 .urgent => self.scheduler.markUrgent(),
                 .normal => self.scheduler.markDirty(),
             }
             self.bus.publish(payload);
-            delivered += 1;
         }
         return delivered;
     }

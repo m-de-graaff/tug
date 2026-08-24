@@ -161,13 +161,21 @@ const PosixWaker = struct {
     }
 
     fn drain(self: *PosixWaker) void {
-        // Cleared before the read, not after. A wake landing in between writes
-        // a byte this read may or may not collect — and if it does not, the
-        // byte stays in the pipe and the next wait returns for it.
-        self.pending.store(false, .release);
-
+        // Read first, clear second. The other order loses wakeups permanently,
+        // and it took a firehose to find out: clearing first opens a window in
+        // which a producer writes a byte, this read collects it, and the flag
+        // is left set with an empty pipe — after which every `wake` is
+        // suppressed as redundant and the loop blocks in `poll` forever.
+        //
+        // This order has no such window. A wake landing between the read and
+        // the store is suppressed, but only while a byte it did not write is
+        // still accounted for — and the loop drains the queue immediately after
+        // this call, so whatever that producer had already pushed is collected
+        // on this pass rather than waiting for a wake that never comes.
         var scratch: [16]u8 = undefined;
         _ = posix.read(self.read_fd, &scratch) catch {};
+
+        self.pending.store(false, .release);
     }
 };
 
@@ -286,6 +294,42 @@ test "waking makes the handle readable and draining clears it" {
     waker.drain();
     const drained = try wait(waker.readHandle(), null, 0);
     try testing.expect(!drained.input);
+}
+
+test "a wake racing a drain is never lost" {
+    var waker: Waker = try .init();
+    defer waker.deinit();
+
+    var running: std.atomic.Value(bool) = .init(true);
+
+    const Ringer = struct {
+        fn run(target: *Waker, alive: *std.atomic.Value(bool)) void {
+            while (alive.load(.acquire)) target.wake();
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, Ringer.run, .{ &waker, &running });
+    defer {
+        running.store(false, .release);
+        thread.join();
+    }
+
+    // Every one of these has to be answered by a doorbell that is still
+    // ringing. Clearing the pending flag before the read instead of after
+    // opens a window where the read collects a byte the flag is still
+    // accounting for — after which every `wake` is suppressed as redundant,
+    // nothing is ever written again, and this times out.
+    //
+    // Found by `--mock-fault firehose`, which painted one frame in eight
+    // seconds and then sat in `poll` looking like a hung process.
+    for (0..200) |round| {
+        const ready = try wait(waker.readHandle(), null, 1000);
+        if (!ready.input) {
+            std.debug.print("the doorbell went silent after {d} rounds\n", .{round});
+            return error.WakeLost;
+        }
+        waker.drain();
+    }
 }
 
 test "repeated wakes coalesce into one pending signal" {

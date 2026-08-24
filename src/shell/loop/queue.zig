@@ -122,19 +122,29 @@ pub const Queue = struct {
         return payload;
     }
 
-    /// Publishes everything queued onto the bus, and reports how many. The count
+    /// Publishes what is queued onto the bus, and reports how many. The count
     /// is what lets a caller tell an empty wake — a resize — from a full one.
     ///
     /// Pops one at a time and publishes outside the lock, so a subscriber that
-    /// pushes cannot deadlock against the drain. Looping until `pop` comes back
-    /// empty rather than taking a count up front also collects anything a
-    /// producer added mid-drain.
+    /// pushes cannot deadlock against the drain.
+    ///
+    /// **Bounded, and that bound is load-bearing.** Draining until `pop` comes
+    /// back empty reads as the thorough thing to do and is a livelock against
+    /// any producer faster than the consumer: a firehose refills the ring
+    /// mid-drain, `pop` never returns null, and the loop never reaches the
+    /// paint that the whole frame budget is expressed in. `--provider mock
+    /// --mock-fault firehose` did exactly that — one frame, then a process that
+    /// looked hung.
+    ///
+    /// `capacity` is the right bound rather than an arbitrary one: it is
+    /// everything that *could* have been queued when the drain began, so
+    /// nothing is ever left behind for a wake that may not come.
     pub fn drainInto(self: *Queue, io: std.Io, bus: *core.Bus) usize {
         var out: [max_payload_bytes]u8 = undefined;
         var delivered: usize = 0;
-        while (self.pop(io, &out)) |payload| {
+        while (delivered < capacity) : (delivered += 1) {
+            const payload = self.pop(io, &out) orelse break;
             bus.publish(payload);
-            delivered += 1;
         }
         return delivered;
     }
@@ -275,6 +285,50 @@ test "draining publishes everything onto the bus and reports the count" {
     try testing.expectEqual(@as(usize, 2), queue.drainInto(io, &bus));
     try testing.expectEqual(@as(usize, 2), recorder.count);
     try testing.expectEqual(@as(usize, 0), queue.drainInto(io, &bus));
+}
+
+test "a drain returns even against a producer that never stops" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+
+    var recorder: Recorder = .{};
+    var bus: core.Bus = .{};
+    try bus.subscribe(.{ .context = &recorder, .handler = Recorder.onEvent });
+
+    var queue: Queue = .{};
+    var running: std.atomic.Value(bool) = .init(true);
+
+    // A producer that refills the ring as fast as it empties. Draining until
+    // `pop` returns null against this never returns, and the loop that is
+    // supposed to be painting between drains never paints. Before the bound,
+    // `--mock-fault firehose` reproduced this as a process that painted one
+    // frame and then looked hung.
+    const Flood = struct {
+        fn run(target: *Queue, producer_io: std.Io, alive: *std.atomic.Value(bool)) void {
+            while (alive.load(.acquire)) {
+                target.push(producer_io, .{ .stream_delta = .{ .text = "x" } }) catch continue;
+            }
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, Flood.run, .{ &queue, io, &running });
+    defer {
+        running.store(false, .release);
+        thread.join();
+    }
+
+    // Each of these has to come back. If any one of them hangs, the test times
+    // out rather than failing — which is itself the signal. The loop runs until
+    // the producer has been scheduled at least once, because a drain that
+    // returned only because the queue was still empty proves nothing.
+    var rounds: usize = 0;
+    while (recorder.count == 0 and rounds < 10_000) : (rounds += 1) {
+        try testing.expect(queue.drainInto(io, &bus) <= capacity);
+    }
+    try testing.expect(recorder.count > 0);
+    for (0..8) |_| {
+        try testing.expect(queue.drainInto(io, &bus) <= capacity);
+    }
 }
 
 test "pushes from other threads all arrive" {
