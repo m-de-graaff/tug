@@ -17,6 +17,7 @@ pub const proto = @import("tugproto");
 pub const backend = @import("term/backend.zig");
 pub const caps = @import("term/caps.zig");
 pub const modes = @import("term/modes.zig");
+pub const probe = @import("term/probe.zig");
 pub const key = @import("input/key.zig");
 pub const decoder = @import("input/decoder.zig");
 pub const waiting = @import("loop/wait.zig");
