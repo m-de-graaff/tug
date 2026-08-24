@@ -79,10 +79,19 @@ pub const Cadence = struct {
     }
 
     /// How many bytes of `remaining` belong in the next chunk.
+    ///
+    /// Never more than a queue slot holds, whatever the fault asked for. The
+    /// runner pushes what this returns straight onto the queue, and a chunk
+    /// over the slot size comes back `PayloadTooLarge` — which the runner can
+    /// only drop, silently, in the middle of a stream. `split_utf8` is the one
+    /// that can reach for it: a delta whose first multi-byte codepoint sits
+    /// past the slot boundary would ask to cut there.
     pub fn chunkLen(self: *Cadence, remaining: []const u8) usize {
         if (remaining.len == 0) return 0;
         if (self.fault == .split_utf8) {
-            if (splitInsideCodepoint(remaining)) |cut| return cut;
+            if (splitInsideCodepoint(remaining)) |cut| {
+                if (cut <= queue.max_payload_bytes) return cut;
+            }
         }
         return switch (self.preset) {
             // Not the whole remainder: a slot is the most the queue will take,
@@ -195,6 +204,17 @@ test "split_utf8 falls back to the preset when there is nothing to split" {
     var c: Cadence = .init(3, .instant, .split_utf8, 0);
     const ascii = "plain ascii only";
     try testing.expectEqual(ascii.len, c.chunkLen(ascii));
+}
+
+test "split_utf8 does not ask for a chunk the queue would refuse" {
+    // A delta whose first multi-byte codepoint sits past the slot boundary. The
+    // cut it wants is over the limit, so the preset has to win — otherwise the
+    // runner gets `PayloadTooLarge` and drops the chunk silently, mid-stream.
+    var c: Cadence = .init(3, .instant, .split_utf8, 0);
+    const late = ("a" ** (queue.max_payload_bytes + 8)) ++ "日本語";
+    const take = c.chunkLen(late);
+    try testing.expect(take <= queue.max_payload_bytes);
+    try testing.expect(take > 0);
 }
 
 test "stall pauses once, mid-stream, and then behaves" {
