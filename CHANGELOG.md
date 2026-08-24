@@ -34,7 +34,7 @@ the output and enforced nowhere. Every probe read is now gated on a `poll` with
 that deadline, and the budget is spent once across both queries rather than once
 per query.
 
-### Milestone 2 «It streams» — Phase 3
+### Milestone 2 «It streams» — Phases 3 and 4
 
 **Phase 3, loop and event bus.** One blocking loop: wait, decode input, drain
 the cross-thread queue, publish, render if dirty. It blocks in exactly one
@@ -67,11 +67,50 @@ the terminal back. Part of why it had never run is that `core.autocrlf` checked
 it out with CRLF, which `sh` rejects on the `set -eu` line; `.gitattributes` now
 pins shell and Zig sources to LF in the working tree.
 
+**Phase 4, the renderer.** Markdown streamed into normal scrollback, without
+ever rewriting it. The screen has two regions and they never mix: committed
+scrollback is printed once and belongs to the terminal from that moment on, and
+the active tail is bounded to fit on screen, erased and repainted every frame.
+The rows a repaint moves the cursor back over are counted by the same function
+that emitted them — called once with a null writer to measure and once with the
+real one to draw — because two functions would drift, and drift here erases a
+line of your scrollback permanently.
+
+A frame is composed in one buffer and flushed once. That, rather than the
+terminal's synchronized-output support, is the flicker-free claim; the DECSET
+2026 guards are an optimization on top of it where `DR-004`'s probe says they
+are available. A counting writer in the tests makes the one-write rule
+something the build checks rather than something the code intends.
+
+Markdown-lite, line-local by design: headings, both list kinds, fences, and
+`**bold**`, `*italic*` and `` `code` `` inside a single line. An unmatched
+marker stays the characters it is, so a stray asterisk can never style the rest
+of a response. Widths are measured per codepoint against East Asian and
+zero-width tables (`DR-005`), which is what lets the wrap know its own row count
+exactly; grapheme clusters wait for v0.9. One dim row says a response is still
+streaming and disappears when it commits (`DR-008`).
+
+Six golden transcripts under `testdata/golden/` pin down what the bytes look
+like, and a property test over 400 randomized scripts pins down the arithmetic
+under them. `tug --debug-render` streams a hardcoded burst through the whole
+thing at about a thousand deltas a second.
+
+Two of this phase's own tests found bugs worth naming. Control bytes in a text
+delta used to reach the terminal, which makes a raw `ESC` from a provider an
+escape-sequence injection — the same attack paste content is already stripped
+of. And a line that outgrew the screen before its newline arrived could not be
+committed, leaving a tail the cursor-up could no longer reach the top of.
+
+Cost: 13,280 bytes, taking the binary to 131,992 of the 500 KiB budget. Tests
+go from 76 to 134.
+
 ### Not yet
 
-The renderer, the mock provider, the editor, config, keymaps, themes and
-commands — Phases 4 to 11. `tug` with no arguments prints its usage rather than
-pretending to be a shell.
+The mock provider, the editor, config, keymaps, themes and commands — Phases 5
+to 11. `tug` with no arguments prints its usage rather than pretending to be a
+shell. And no terminal emulator has yet watched the renderer stream: the
+no-flicker eyeball test in kitty and alacritty is Phase 4's stated exit
+criterion and is still open.
 
 ### Toolchain
 
