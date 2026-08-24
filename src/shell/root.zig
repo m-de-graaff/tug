@@ -22,6 +22,7 @@ pub const decoder = @import("input/decoder.zig");
 pub const waiting = @import("loop/wait.zig");
 pub const queue = @import("loop/queue.zig");
 pub const loop = @import("loop/loop.zig");
+pub const width = @import("render/width.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;
