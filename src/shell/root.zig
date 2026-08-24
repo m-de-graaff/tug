@@ -53,4 +53,5 @@ test {
     _ = @import("render/golden.zig");
     _ = @import("render/rows_test.zig");
     _ = @import("provider/golden.zig");
+    _ = @import("provider/firehose_test.zig");
 }
