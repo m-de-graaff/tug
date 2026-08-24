@@ -14,7 +14,6 @@ const std = @import("std");
 const core = @import("tugcore");
 const shell = @import("tugshell");
 const panic_handler = @import("panic.zig");
-const demo_script = @import("shell/render/demo.zig");
 
 pub const panic = panic_handler.handler;
 
@@ -53,14 +52,26 @@ const usage =
     \\  -h, --help       Print this message and exit.
     \\  -V, --version    Print the version and exit.
     \\
+    \\provider:
+    \\  --provider mock    Stream a seeded mock response and exit.
+    \\  --mock-seed N      Seed the mock (default 0). Same seed, same bytes.
+    \\  --mock-cadence C   normal | instant | firehose
+    \\  --mock-fault F     none | stall[=ms] | midstream_error | oversized_chunk
+    \\                     | split_utf8 | instant | firehose | empty
+    \\
     \\debugging:
-    \\  --caps           Print detected terminal capabilities and exit.
-    \\  --debug-keys     Echo decoded key events until ctrl+c.
-    \\  --debug-render   Stream a hardcoded markdown burst until ctrl+c.
+    \\  --caps             Print detected terminal capabilities and exit.
+    \\  --debug-keys       Echo decoded key events until ctrl+c.
     \\
 ;
 
-const Command = enum { help, version, caps, debug_keys, debug_render, shell };
+const Command = enum { help, version, caps, debug_keys, mock, shell };
+
+const Options = struct {
+    command: Command = .shell,
+    mock: core.mock.Config = .{},
+    cadence: shell.cadence.Preset = .normal,
+};
 
 pub fn main(init: std.process.Init.Minimal) !void {
     // Before any output, including the two paths that never open a terminal.
@@ -83,7 +94,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_file.interface;
 
-    switch (parseCommand(argv)) {
+    const options = parseArgs(argv);
+    switch (options.command) {
         .version => {
             try printVersion(stdout);
             return stdout.flush();
@@ -97,27 +109,79 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return stdout.flush();
         },
         .debug_keys => return debugKeys(io, stdout, init.environ, environment_allocator.allocator()),
-        .debug_render => return debugRender(io, stdout, init.environ, environment_allocator.allocator()),
+        .mock => return runMock(
+            io,
+            stdout,
+            init.environ,
+            environment_allocator.allocator(),
+            options,
+        ),
         .shell => {
-            // Phases 3 onward. Until the loop and the renderer exist there is
-            // nothing to drop the user into, and pretending otherwise would be
-            // worse than saying so.
+            // Phase 6 onward. Until the editor exists there is nothing to drop
+            // the user into, and pretending otherwise would be worse than
+            // saying so.
             try stdout.writeAll(usage);
             return stdout.flush();
         },
     }
 }
 
-fn parseCommand(argv: []const [:0]const u8) Command {
+/// These are debug flags, so a bad value degrades to the default rather than
+/// refusing to start: a typo in `--mock-fault` should not be the reason a shell
+/// will not open. `--provider` is the only one that decides the command; the
+/// rest configure it, and are ignored when no provider was asked for.
+fn parseArgs(argv: []const [:0]const u8) Options {
+    var options: Options = .{};
+    var requested_cadence: shell.cadence.Preset = .normal;
+
     const args = argv[@min(1, argv.len)..];
-    for (args) |arg| {
-        if (eqlAny(arg, &.{ "--version", "-V" })) return .version;
-        if (eqlAny(arg, &.{ "--help", "-h" })) return .help;
-        if (eqlAny(arg, &.{"--caps"})) return .caps;
-        if (eqlAny(arg, &.{"--debug-render"})) return .debug_render;
-        if (eqlAny(arg, &.{"--debug-keys"})) return .debug_keys;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        const value: ?[]const u8 = if (index + 1 < args.len) args[index + 1] else null;
+
+        if (eqlAny(arg, &.{ "--version", "-V" })) return .{ .command = .version };
+        if (eqlAny(arg, &.{ "--help", "-h" })) return .{ .command = .help };
+        if (eqlAny(arg, &.{"--caps"})) return .{ .command = .caps };
+        if (eqlAny(arg, &.{"--debug-keys"})) return .{ .command = .debug_keys };
+
+        if (eqlAny(arg, &.{"--provider"})) {
+            if (value) |name| {
+                if (std.mem.eql(u8, name, "mock")) options.command = .mock;
+                index += 1;
+            }
+        } else if (eqlAny(arg, &.{"--mock-seed"})) {
+            if (value) |text| {
+                options.mock.seed = std.fmt.parseInt(u64, text, 10) catch options.mock.seed;
+                index += 1;
+            }
+        } else if (eqlAny(arg, &.{"--mock-fault"})) {
+            if (value) |text| {
+                parseFault(text, &options.mock);
+                index += 1;
+            }
+        } else if (eqlAny(arg, &.{"--mock-cadence"})) {
+            if (value) |text| {
+                requested_cadence = shell.cadence.Preset.parse(text) orelse requested_cadence;
+                index += 1;
+            }
+        }
     }
-    return .shell;
+
+    options.cadence = shell.cadence.presetFor(options.mock.fault, requested_cadence);
+    return options;
+}
+
+/// `stall` alone means the default pause; `stall=250` names it. No other fault
+/// takes a parameter, and one that did would be parsed here rather than by
+/// growing a flag per fault.
+fn parseFault(text: []const u8, config: *core.mock.Config) void {
+    const split = std.mem.indexOfScalar(u8, text, '=');
+    const name = if (split) |at| text[0..at] else text;
+    config.fault = core.mock.Fault.parse(name) orelse return;
+    if (split) |at| {
+        config.stall_ms = std.fmt.parseInt(u32, text[at + 1 ..], 10) catch config.stall_ms;
+    }
 }
 
 fn eqlAny(arg: []const u8, candidates: []const []const u8) bool {
@@ -386,18 +450,20 @@ const KeyEcho = struct {
     }
 };
 
-/// Streams a hardcoded markdown burst through the renderer until ctrl+c.
+/// Streams one seeded mock response and exits.
 ///
-/// The eyeball test for Phase 4, and the last hardcoded client before Phase 5
-/// replaces the script with a real mock provider. Everything below the burst is
-/// the Phase 3 loop unchanged: the demo hangs off `onRender` and pushes onto the
-/// same queue a provider thread will, so what is being watched is the machinery
-/// rather than a special path built to look good.
-fn debugRender(
+/// The wiring the phase is really about. A provider thread pushes onto the
+/// Phase-3 queue, the loop drains it onto the bus, a subscriber feeds the
+/// Phase-4 renderer, and the loop paints when the scheduler says to. Nothing in
+/// the loop knows a provider exists, and nothing in the provider knows a
+/// terminal does — which is the claim Phases 3 and 4 were making, tested for
+/// the first time here.
+fn runMock(
     io: std.Io,
     out: *std.Io.Writer,
     environ: std.process.Environ,
     gpa: std.mem.Allocator,
+    options: Options,
 ) !void {
     var terminal = shell.backend.open() catch |err| switch (err) {
         error.NotATerminal => {
@@ -434,24 +500,47 @@ fn debugRender(
     var scratch: [4096]u8 = undefined;
     var decoder: shell.Decoder = .init(&scratch);
 
-    // The renderer is the first thing in tug that allocates. A debug flag that
-    // runs for a few seconds and exits does not need leak detection on top of
-    // what the unit tests already do with `std.testing.allocator`.
+    // The renderer is the first thing in tug that allocates. A one-turn process
+    // does not need leak detection on top of what the unit tests already do
+    // with `std.testing.allocator`.
     var renderer: shell.Renderer = .init(std.heap.smp_allocator, detected, terminal.size());
     defer renderer.deinit();
-    try renderer.beginBlock(.assistant);
 
-    var demo: RenderDemo = .{
+    var mock: core.mock.Mock = .init(options.mock);
+    var cadence: shell.Cadence = .init(
+        options.mock.seed,
+        options.cadence,
+        options.mock.fault,
+        options.mock.stall_ms,
+    );
+    var stop: std.atomic.Value(bool) = .init(false);
+
+    var provider_runner: shell.Runner = .{
         .io = io,
+        .provider = mock.provider(),
+        .cadence = &cadence,
+        .queue = &queue,
+        .waker = &waker,
+        .stop = &stop,
+    };
+
+    var session: MockSession = .{
         .renderer = &renderer,
         .screen = screen,
         .terminal = &terminal,
-        .queue = &queue,
-        .waker = &waker,
     };
+    try bus.subscribe(.{ .context = &session, .handler = MockSession.onEvent });
 
-    // The first frame is owed before anything has happened.
-    scheduler.markDirty();
+    const thread = try provider_runner.spawn();
+    // Ahead of every return below, including the error ones. A thread still
+    // pushing onto a queue whose stack frame is gone is the one failure worse
+    // than a broken terminal. Setting the flag before joining is what lets a
+    // firehose notice while it is parked on backpressure rather than only
+    // between events.
+    defer {
+        stop.store(true, .release);
+        thread.join();
+    }
 
     var loop: shell.Loop = .{
         .io = io,
@@ -462,33 +551,63 @@ fn debugRender(
         .decoder = &decoder,
         .scheduler = &scheduler,
         .handlers = .{
-            .context = &demo,
-            .onInput = RenderDemo.onInput,
-            .onRender = RenderDemo.onRender,
+            .context = &session,
+            .onInput = MockSession.onInput,
+            .onRender = MockSession.onRender,
         },
     };
 
-    try loop.run();
+    loop.run() catch |err| switch (err) {
+        // Not a failure: it is the only way a one-turn session ends on its own.
+        error.TurnFinished => {},
+        else => return err,
+    };
     try screen.writeAll("\r\n");
     try screen.flush();
 }
 
-/// The `--debug-render` client.
+/// The `--provider mock` client: a bus subscriber and two loop callbacks.
 ///
-/// Feeds a few chunks, paints, and then rings the waker with an event on the
-/// queue so the loop comes back round. Going through the queue rather than
-/// painting in a tight loop is what keeps the frame budget in play: a queued
-/// delta marks the scheduler dirty rather than urgent, so the burst coalesces
-/// to about 125 frames a second no matter how fast it is fed.
-const RenderDemo = struct {
-    io: std.Io,
+/// Note what it does *not* do. It never touches the queue, never asks the
+/// provider for anything, and never decides when to paint. It reacts to
+/// payloads and draws. That is the shape every future consumer has, and it is
+/// why Phase 6's editor can hang off the same callbacks without the loop
+/// changing.
+const MockSession = struct {
     renderer: *shell.Renderer,
     screen: *std.Io.Writer,
     terminal: *shell.Backend,
-    queue: *shell.Queue,
-    waker: *shell.Waker,
-    offset: usize = 0,
+    failed: ?anyerror = null,
     finished: bool = false,
+
+    /// The bus hands back `void`, so a failure is stored and re-raised on the
+    /// next render rather than swallowed. A subscriber that could return an
+    /// error would mean making the bus generic over an error set for the
+    /// benefit of one caller.
+    fn onEvent(context: ?*anyopaque, payload: shell.proto.Payload) void {
+        const self: *MockSession = @ptrCast(@alignCast(context.?));
+        self.apply(payload) catch |err| {
+            self.failed = err;
+        };
+    }
+
+    fn apply(self: *MockSession, payload: shell.proto.Payload) !void {
+        switch (payload) {
+            .request_start => try self.renderer.beginBlock(.assistant),
+            .stream_delta => |delta| try self.renderer.feed(delta.text),
+            .err => |failure| {
+                // A notice block, which commits the partial assistant block
+                // above it: whatever the provider managed to say stays on
+                // screen, and the reason it stopped goes underneath.
+                try self.renderer.beginBlock(.notice);
+                try self.renderer.feed(failure.message);
+                try self.renderer.feed("\n");
+            },
+            .stream_end => try self.renderer.endBlock(),
+            .turn_end => self.finished = true,
+            else => {},
+        }
+    }
 
     fn onInput(context: ?*anyopaque, event: shell.InputEvent) shell.loop.Flow {
         _ = context;
@@ -502,34 +621,20 @@ const RenderDemo = struct {
     }
 
     fn onRender(context: ?*anyopaque) anyerror!void {
-        const self: *RenderDemo = @ptrCast(@alignCast(context.?));
+        const self: *MockSession = @ptrCast(@alignCast(context.?));
+        if (self.failed) |err| return err;
 
-        // Asked for every frame rather than tracked. A resize wakes the loop and
-        // carries no payload — `SIGWINCH` writes one byte and nothing else — so
-        // one `ioctl` a frame is cheaper than the bookkeeping that would avoid
-        // it, and it is the only shape Windows can follow.
+        // Asked for every frame rather than tracked. A resize wakes the loop
+        // and carries no payload — `SIGWINCH` writes one byte and nothing else
+        // — so one `ioctl` a frame is cheaper than the bookkeeping that would
+        // avoid it, and it is the only shape Windows can follow.
         self.renderer.setSize(self.terminal.size());
-
-        for (0..demo_script.chunks_per_frame) |_| {
-            if (self.offset >= demo_script.script.len) break;
-            const end = @min(self.offset + demo_script.chunk_bytes, demo_script.script.len);
-            try self.renderer.feed(demo_script.script[self.offset..end]);
-            self.offset = end;
-        }
-        if (self.offset >= demo_script.script.len and !self.finished) {
-            try self.renderer.endBlock();
-            self.finished = true;
-        }
-
         _ = try self.renderer.paint(self.screen);
         try self.screen.flush();
 
-        if (self.finished) return;
-
-        // More to say. The queue and the waker are the same pair a provider
-        // thread will use in Phase 5.
-        self.queue.push(self.io, .{ .stream_delta = .{ .text = "" } }) catch {};
-        self.waker.wake();
+        // The turn is over and there is no editor yet to hand control to, so
+        // the honest thing is to leave. Phase 6 replaces this with a prompt.
+        if (self.finished) return error.TurnFinished;
     }
 };
 
@@ -559,11 +664,67 @@ test "commands are recognized and the default is the shell" {
         .{ .args = &.{ "tug", "--help" }, .want = .help },
         .{ .args = &.{ "tug", "--caps" }, .want = .caps },
         .{ .args = &.{ "tug", "--debug-keys" }, .want = .debug_keys },
-        .{ .args = &.{ "tug", "--debug-render" }, .want = .debug_render },
+        .{ .args = &.{ "tug", "--provider", "mock" }, .want = .mock },
     };
     for (cases) |case| {
-        try testing.expectEqual(case.want, parseCommand(case.args));
+        try testing.expectEqual(case.want, parseArgs(case.args).command);
     }
+}
+
+test "the mock flags parse" {
+    const cases = [_]struct {
+        args: []const [:0]const u8,
+        seed: u64 = 0,
+        fault: core.mock.Fault = .none,
+        cadence: shell.cadence.Preset = .normal,
+    }{
+        .{ .args = &.{ "tug", "--provider", "mock" } },
+        .{ .args = &.{ "tug", "--provider", "mock", "--mock-seed", "42" }, .seed = 42 },
+        .{
+            .args = &.{ "tug", "--provider", "mock", "--mock-fault", "split_utf8" },
+            .fault = .split_utf8,
+        },
+        .{
+            .args = &.{ "tug", "--provider", "mock", "--mock-cadence", "instant" },
+            .cadence = .instant,
+        },
+        // A fault with a timing opinion picks its own cadence.
+        .{
+            .args = &.{ "tug", "--provider", "mock", "--mock-fault", "firehose" },
+            .fault = .firehose,
+            .cadence = .firehose,
+        },
+    };
+    for (cases) |case| {
+        const options = parseArgs(case.args);
+        try testing.expectEqual(Command.mock, options.command);
+        try testing.expectEqual(case.seed, options.mock.seed);
+        try testing.expectEqual(case.fault, options.mock.fault);
+        try testing.expectEqual(case.cadence, options.cadence);
+    }
+}
+
+test "stall takes an optional millisecond count" {
+    const plain = parseArgs(&.{ "tug", "--provider", "mock", "--mock-fault", "stall" });
+    try testing.expectEqual(core.mock.Fault.stall, plain.mock.fault);
+    try testing.expectEqual(@as(u32, 1500), plain.mock.stall_ms);
+
+    const explicit = parseArgs(&.{ "tug", "--provider", "mock", "--mock-fault", "stall=250" });
+    try testing.expectEqual(core.mock.Fault.stall, explicit.mock.fault);
+    try testing.expectEqual(@as(u32, 250), explicit.mock.stall_ms);
+}
+
+test "a bad flag value falls back rather than failing" {
+    // A debug flag is not a trust boundary, and a typo in one should not stop
+    // the shell from starting. An unparsable value keeps the default.
+    const fault = parseArgs(&.{ "tug", "--provider", "mock", "--mock-fault", "explode" });
+    try testing.expectEqual(core.mock.Fault.none, fault.mock.fault);
+    const seed = parseArgs(&.{ "tug", "--provider", "mock", "--mock-seed", "abc" });
+    try testing.expectEqual(@as(u64, 0), seed.mock.seed);
+}
+
+test "an unknown provider is not the mock" {
+    try testing.expectEqual(Command.shell, parseArgs(&.{ "tug", "--provider", "anthropic" }).command);
 }
 
 test "the probe stops early only once both replies have arrived" {
