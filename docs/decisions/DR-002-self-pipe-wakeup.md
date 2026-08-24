@@ -63,11 +63,21 @@ returns from the next wait. Clearing afterwards would drop a wake that arrived
 between the read and the clear, and a lost wake here is a frame that never
 paints or an event that sits in the queue until the next keystroke.
 
-**Windows uses an auto-reset event.** It has neither `eventfd` nor a self-pipe
+**Windows uses a manual-reset event.** It has neither `eventfd` nor a self-pipe
 that `WaitForMultipleObjects` can wait on alongside a console input handle.
-`CreateEventW` plus `SetEvent` is the same shape, and the auto-reset semantics
-mean the wait itself consumes the signal, so `drain` there is a no-op. Windows is
-tier-2 (`DR-009`) and this is not certified.
+`CreateEventW` plus `SetEvent` is the same shape, and `SetEvent` on an
+already-signalled event is a no-op, so the coalescing comes for free rather than
+from a flag.
+
+Auto-reset looks like the better fit and is not. It makes the wait consume the
+signal, which makes `drain` a no-op — and then `drain` means one thing on POSIX
+and another on Windows, which is exactly the kind of divergence a single
+`Waker` type exists to prevent. The Windows CI job caught it: the coalescing
+test drains without waiting first and saw a waker that would not go quiet.
+Manual reset plus an explicit `ResetEvent` gives both platforms one contract —
+`wake` arms, `drain` disarms, `wait` reports.
+
+Windows is tier-2 (`DR-009`) and none of this is certified.
 
 ## Consequences
 

@@ -187,6 +187,7 @@ extern "kernel32" fn CreateEventW(
     name: ?[*:0]const u16,
 ) callconv(.winapi) ?windows.HANDLE;
 extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn ResetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn WaitForMultipleObjects(
     count: windows.DWORD,
     handles: [*]const windows.HANDLE,
@@ -223,9 +224,20 @@ const WindowsWaker = struct {
     event: windows.HANDLE,
 
     fn init() Error!WindowsWaker {
-        // Auto-reset, initially unsignalled: the wait itself consumes the
-        // signal, which is why `drain` has nothing to do here.
-        const event = CreateEventW(null, .FALSE, .FALSE, null) orelse return error.Unexpected;
+        // Manual reset, initially unsignalled.
+        //
+        // An auto-reset event would look like the natural fit — the wait
+        // consumes the signal and `SetEvent` coalesces for free — but it makes
+        // `drain` a no-op, and then `drain` means two different things on the
+        // two platforms. The loop calls `wait` and then `drain`, so under
+        // auto-reset the wait consumes the signal the drain was supposed to
+        // clear, and any test that drains without waiting first sees a waker
+        // that will not go quiet.
+        //
+        // Manual reset plus an explicit `ResetEvent` gives both platforms one
+        // contract: `wake` arms, `drain` disarms, `wait` reports.
+        const event = CreateEventW(null, windows.BOOL.TRUE, .FALSE, null) orelse
+            return error.Unexpected;
         return .{ .event = event };
     }
 
@@ -246,7 +258,9 @@ const WindowsWaker = struct {
     }
 
     fn drain(self: *WindowsWaker) void {
-        _ = self;
+        // `SetEvent` on an already-signalled manual-reset event is a no-op, so
+        // the coalescing the POSIX side gets from its atomic flag is free here.
+        _ = ResetEvent(self.event);
     }
 };
 
