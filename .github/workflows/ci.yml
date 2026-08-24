@@ -1,0 +1,151 @@
+name: ci
+
+# Every gate the roadmap names, wired from the first release. The budgets are
+# the product's claims; a claim without a gate is a wish.
+#
+# Ordering is cheapest-first: a formatting mistake should cost ten seconds, not
+# the whole matrix. Independent jobs run in parallel; the wall-clock budget is
+# five minutes and `wall-clock` fails the run if it is exceeded.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, per DR-001. Bumping this is a changelog event, never a surprise.
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  # --- seconds ------------------------------------------------------------
+
+  fmt:
+    name: format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: zig fmt --check build.zig src
+
+  no-network:
+    name: zero network code
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # No toolchain needed: this is a grep, and it stays a grep so it cannot
+      # fail for any reason other than the one it exists to catch.
+      - run: sh scripts/no-network.sh src
+
+  # --- the bulk of the signal ---------------------------------------------
+
+  test:
+    name: test (${{ matrix.optimize }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Debug runs the DebugAllocator, so a leaked byte is a failed test.
+        # ReleaseSafe keeps bounds, overflow and cast checks on over the same
+        # suite — the modes catch different bugs, so both are required.
+        optimize: [Debug, ReleaseSafe]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+
+  wasm:
+    name: tugcore is freestanding
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The sans-IO discipline, enforced by the toolchain rather than by
+      # memory. Importing std.fs, std.posix, std.Thread or std.time into
+      # tugcore fails here.
+      - run: zig build wasm-check
+
+  # --- budgets ------------------------------------------------------------
+
+  size:
+    name: binary size
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The budget is stated for a static Linux x86_64 build, so it is measured
+      # against exactly that and not against whatever the runner happens to be.
+      - run: zig build -Dtarget=x86_64-linux-musl
+      - run: sh scripts/size-gate.sh zig-out/bin/tug 512000
+
+  version-latency:
+    name: --version under 2 ms
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: |
+          curl -fsSL -o hyperfine.deb \
+            https://github.com/sharkdp/hyperfine/releases/download/v1.20.0/hyperfine_1.20.0_amd64.deb
+          sudo dpkg -i hyperfine.deb
+      - run: zig build
+      - run: sh scripts/bench-version.sh zig-out/bin/tug
+
+  # --- platform -----------------------------------------------------------
+
+  windows-compile:
+    name: windows compiles (tier-2)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # Windows is tier-2 until v0.9: it must compile and the tests must pass.
+      # Terminal certification is explicitly not promised here.
+      - run: zig build
+      - run: zig build test
+
+  # --- the meta-gate ------------------------------------------------------
+
+  wall-clock:
+    name: ci under 5 min
+    runs-on: ubuntu-24.04
+    needs: [fmt, no-network, test, wasm, size, version-latency, windows-compile]
+    if: always()
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: fail if any gate failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "a required gate failed; see the jobs above" >&2
+          exit 1
+      - name: check wall clock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          started=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --jq '.run_started_at')
+          elapsed=$(( $(date -u +%s) - $(date -u -d "$started" +%s) ))
+          budget=300
+          echo "ci wall clock: ${elapsed}s (budget ${budget}s)"
+          if [ "$elapsed" -gt "$budget" ]; then
+            echo "over the CI wall-clock budget" >&2
+            exit 1
+          fi
