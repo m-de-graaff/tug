@@ -83,6 +83,7 @@ test "reported rows are emitted rows, and each frame moves back over exactly the
         });
 
         var previous_tail: ?u32 = null;
+        var previous_cols: u16 = caps.size.cols;
         const paints = random.intRangeAtMost(usize, 1, 6);
         for (0..paints) |_| {
             for (0..random.intRangeAtMost(usize, 0, 12)) |_| {
@@ -105,9 +106,15 @@ test "reported rows are emitted rows, and each frame moves back over exactly the
                 countRows(output),
             );
 
-            // The frame moved back over exactly the previous frame's tail.
-            if (previous_tail) |expected| {
-                const moved = cursorUp(output);
+            // The frame moved back over exactly the previous frame's tail —
+            // unless the width changed, in which case the terminal rewrapped
+            // those rows and the recorded count no longer describes them. The
+            // renderer abandons them instead of guessing, so there is no
+            // cursor-up at all.
+            const moved = cursorUp(output);
+            if (renderer.size.cols != previous_cols) {
+                try testing.expectEqual(@as(?u32, null), moved);
+            } else if (previous_tail) |expected| {
                 if (expected == 0) {
                     try testing.expectEqual(@as(?u32, null), moved);
                 } else {
@@ -115,6 +122,7 @@ test "reported rows are emitted rows, and each frame moves back over exactly the
                 }
             }
             previous_tail = frame.tail_rows;
+            previous_cols = renderer.size.cols;
 
             // The tail fits on screen, or the cursor-up cannot reach its top.
             // Below three rows there is nowhere for the status hint and the

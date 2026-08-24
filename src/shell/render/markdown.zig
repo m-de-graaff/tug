@@ -60,10 +60,18 @@ pub fn classify(text: []const u8, in_fence: bool) Classified {
     if (std.mem.trim(u8, text, " \t").len == 0) return .{ .kind = .blank };
 
     if (text[0] == '#') {
-        var hashes: u8 = 0;
-        while (hashes < text.len and text[hashes] == '#') hashes += 1;
+        // Counted in a `usize` and stopped at seven. A `u8` overflows on a line
+        // of 256 hashes, which traps in Debug and ReleaseSafe — and this runs on
+        // the *incomplete* line every frame, so a provider streaming a rule of
+        // hashes would take the process down before its newline ever arrived.
+        var hashes: usize = 0;
+        while (hashes < text.len and hashes < 7 and text[hashes] == '#') hashes += 1;
         if (hashes <= 6 and hashes < text.len and text[hashes] == ' ') {
-            return .{ .kind = .heading, .level = hashes, .marker_len = hashes + 1 };
+            return .{
+                .kind = .heading,
+                .level = @intCast(hashes),
+                .marker_len = @intCast(hashes + 1),
+            };
         }
         return .{ .kind = .paragraph };
     }

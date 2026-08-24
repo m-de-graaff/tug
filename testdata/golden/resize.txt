@@ -1,10 +1,10 @@
 alpha bravo charlie\r
 delta echo\r
 \e[2m... streaming\e[0m\r
-\r\e[3F\e[0Jalpha bravo\r
+alpha bravo\r
 charlie\r
 delta echo\r
-\e[2m... streaming\e[0m\r
+\e[2m... streamin\e[0m\r
 \r\e[4F\e[0Jalpha bravo\r
 charlie\r
 delta echo\r

@@ -45,7 +45,7 @@ const argv_buffer_size = 16 * 1024;
 const environment_buffer_size = 64 * 1024;
 
 const usage =
-    \\tug — a tiny, instant, embeddable AI harness.
+    \\tug - Trims Unnecessary Gigabytes | Embeddable AI Harness.
     \\
     \\usage: tug [options]
     \\

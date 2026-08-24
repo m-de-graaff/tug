@@ -59,6 +59,13 @@ const min_cols: usize = 2;
 /// arithmetic and the screen agree, which is the thing that must not drift.
 const tab_width: usize = 4;
 
+/// C0, DEL, and the C1 block. Everything a terminal acts on rather than draws,
+/// and therefore everything the renderer must never pass through: each one
+/// either moves the cursor or opens a sequence, and both put the row count out.
+fn isControl(codepoint: u21) bool {
+    return codepoint < 0x20 or (codepoint >= 0x7f and codepoint < 0xa0);
+}
+
 fn isPlain(style: md.Style) bool {
     return @as(u8, @bitCast(style)) == 0;
 }
@@ -103,6 +110,22 @@ fn completePrefix(bytes: []const u8) usize {
     return bytes.len;
 }
 
+/// The longest prefix of `text` that fits in `cols` cells, cut on a codepoint
+/// boundary. Used only by the status hint, which has to fit on one row.
+fn truncateToWidth(text: []const u8, cols: usize) []const u8 {
+    var width: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const length = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
+        const end = @min(index + length, text.len);
+        const cells = width_mod.stringWidth(text[index..end]);
+        if (width + cells > cols) return text[0..index];
+        width += cells;
+        index = end;
+    }
+    return text;
+}
+
 /// One logical line, and which block it came from. The block is stored per line
 /// rather than read from the renderer's current block, because a frame can
 /// carry the tail of one block and the start of the next.
@@ -132,6 +155,9 @@ pub const Renderer = struct {
 
     tail_rows: u32 = 0,
     painted: bool = false,
+    /// The width the last frame was drawn at. A frame drawn at a different one
+    /// cannot trust its own row count — see `paint`.
+    painted_cols: u16 = 0,
 
     pub fn init(gpa: std.mem.Allocator, caps: Capabilities, size: Size) Renderer {
         return .{ .gpa = gpa, .caps = caps, .size = size };
@@ -271,7 +297,7 @@ pub const Renderer = struct {
         // sentence. A provider that streams a screenful without a newline is
         // getting the honest rendering of what it sent.
         if (self.partial.items.len > 0 and try self.renderPartial(null) > capacity) {
-            try self.finishLine();
+            try self.splitPartial();
         }
 
         try self.row_cache.resize(self.gpa, self.lines.items.len);
@@ -282,7 +308,7 @@ pub const Renderer = struct {
         }
         tail_total += try self.renderPartial(null);
         const hint = self.block != null;
-        if (hint) tail_total += 1;
+        if (hint) tail_total += try self.renderHint(null);
 
         // Age lines out of the tail from the front until what is left fits on
         // screen. Closed blocks age out whole: that is the commit rule.
@@ -295,7 +321,24 @@ pub const Renderer = struct {
 
         if (self.caps.synchronized_output) try out.writeAll("\x1b[?2026h");
 
-        if (self.painted) {
+        // A width change makes `tail_rows` a lie, and not a harmless one. The
+        // rows already on screen are hard lines terminated by `\r\n`, so the
+        // terminal re-wraps each of them at the new width: narrowing turns the
+        // tail into *more* physical rows than were counted, and widening into
+        // fewer. Moving back over the recorded count then stops short of the
+        // tail's top — leaving stale rows that compound every frame — or, worse,
+        // overshoots into committed scrollback, where `\x1b[0J` erases lines tug
+        // has promised never to touch.
+        //
+        // There is no count that fixes this: the terminal breaks rows at the
+        // column and tug breaks them at spaces, so the two disagree about how
+        // many rows the same text occupies. So the old tail is abandoned where
+        // it stands — it becomes scrollback, which is exactly the doctrine
+        // everywhere else in this file — and the new one is drawn below it. The
+        // cost is the tail appearing twice across a resize. The alternative is
+        // erasing something that cannot be redrawn.
+        const reflowed = self.painted and self.painted_cols != self.size.cols;
+        if (self.painted and !reflowed) {
             try out.writeAll("\r");
             if (self.tail_rows > 0) try out.print("\x1b[{d}F", .{self.tail_rows});
             try out.writeAll("\x1b[0J");
@@ -311,14 +354,7 @@ pub const Renderer = struct {
             try out.writeAll("\r\n");
         }
         frame.tail_rows += try self.renderPartial(out);
-        if (hint) {
-            var style_buffer: [16]u8 = undefined;
-            try out.writeAll(styleBytes(.{}, .{ .dim = true }, &style_buffer));
-            try out.writeAll(status_hint);
-            try out.writeAll(styleBytes(.{ .dim = true }, .{}, &style_buffer));
-            try out.writeAll("\r\n");
-            frame.tail_rows += 1;
-        }
+        if (hint) frame.tail_rows += try self.renderHint(out);
 
         if (self.caps.synchronized_output) try out.writeAll("\x1b[?2026l");
 
@@ -326,7 +362,66 @@ pub const Renderer = struct {
         self.closed_lines = 0;
         self.tail_rows = frame.tail_rows;
         self.painted = true;
+        self.painted_cols = self.size.cols;
         return frame;
+    }
+
+    /// The status hint, wrapped like every other row.
+    ///
+    /// It used to be written straight to the writer and counted as one row,
+    /// which is right until the terminal is narrower than the hint: the
+    /// terminal then wraps it into two, every later frame moves back one row
+    /// too few, and the screen fills with orphaned fragments. Nothing may reach
+    /// the terminal except through `wrap`, because `wrap` is the only thing
+    /// that counts.
+    /// Ends the incomplete line where it stands, because it has outgrown the
+    /// screen and cannot be committed while it is still being written.
+    ///
+    /// Deliberately not `finishLine`. That routes through the fence check, so a
+    /// fence opener long enough to trigger this would toggle the fence state and
+    /// emit no line at all — the bytes would simply vanish. It also takes the
+    /// whole buffer, trailing half-codepoint included, which would bake a
+    /// replacement character into scrollback permanently and leave the
+    /// continuation bytes to make a second one on the next line.
+    fn splitPartial(self: *Renderer) Error!void {
+        const take = completePrefix(self.partial.items);
+        if (take == 0) return;
+
+        const block = self.block orelse .assistant;
+        const raw = self.partial.items[0..take];
+        const classified: md.Classified = if (block != .assistant)
+            .{ .kind = .paragraph }
+        else if (self.in_fence)
+            .{ .kind = .code }
+        else
+            md.classify(raw, false);
+
+        try self.appendLine(block, classified, raw);
+
+        const rest = self.partial.items[take..];
+        std.mem.copyForwards(u8, self.partial.items, rest);
+        self.partial.items.len = rest.len;
+    }
+
+    /// Exactly one row, always.
+    ///
+    /// Written straight to the writer and counted as one row, this was right
+    /// until the terminal was narrower than its 13 cells: the terminal wrapped
+    /// it, every later frame moved back one row too few, and the screen filled
+    /// with orphaned fragments. Wrapping it properly fixes the count and buys a
+    /// worse problem — on a very narrow terminal the hint alone can be taller
+    /// than the screen, and unlike a content line it cannot be aged out into
+    /// scrollback, so the tail stops fitting at all.
+    ///
+    /// So it is cut to what fits. A hint is a hint; the part of it that would
+    /// have cost four rows of a six-column terminal was never worth them.
+    fn renderHint(self: *Renderer, out: ?*std.Io.Writer) Error!u32 {
+        const cols: usize = @max(min_cols, self.size.cols);
+        const fits = truncateToWidth(status_hint, cols);
+        const rows = try self.wrap(fits, .{ .dim = true }, "", true, out);
+        std.debug.assert(rows == 1);
+        if (out) |writer| try writer.writeAll("\r\n");
+        return rows;
     }
 
     fn renderEntry(self: *Renderer, entry: Entry, out: ?*std.Io.Writer) Error!u32 {
@@ -395,13 +490,22 @@ pub const Renderer = struct {
         const cols: usize = @max(min_cols, self.size.cols);
         const indent = width_mod.stringWidth(marker_text);
 
+        // A marker is dropped rather than shrunk when it would leave less than
+        // one wide character of room. Emitting it anyway would overflow the row
+        // it sits on, the terminal would wrap it, and the row count would be
+        // out by one before a single character of content had been drawn. This
+        // also guarantees `cols - hanging >= 2`, which is what stops `push`
+        // from admitting a codepoint too wide for the row it will land on.
+        const shown = if (indent > cols -| 2) "" else marker_text;
+        const width_of_marker = if (shown.len == 0) 0 else indent;
+
         var state: Wrap = .{
             .gpa = self.gpa,
             .word = &self.word,
             .out = out,
             .cols = cols,
-            .hanging = if (indent < cols) indent else 0,
-            .column = indent,
+            .hanging = width_of_marker,
+            .column = width_of_marker,
             .current = base,
             .word_style = base,
         };
@@ -412,7 +516,7 @@ pub const Renderer = struct {
         // beside it while a code line's leading indent still gets the code
         // style. Inline changes *within* the line are held back to the word
         // they apply to — see `Wrap.setStyle`.
-        if (out) |writer| try writer.writeAll(marker_text);
+        if (out) |writer| try writer.writeAll(shown);
         try state.emitStyle(base);
 
         var pieces: md.Inline = .init(content, base);
@@ -433,18 +537,26 @@ pub const Renderer = struct {
                 const slice = piece.bytes[index..end];
                 index = end;
 
-                if (slice.len == 1 and slice[0] < 0x20 or (slice.len == 1 and slice[0] == 0x7f)) {
-                    // Control bytes never reach the terminal. A text delta is
-                    // whatever a provider chose to send, and a raw ESC in it is
-                    // an escape-sequence injection into the user's terminal —
-                    // the same attack the decoder strips out of a paste. A
-                    // stray CR would be quieter and just as bad: it moves the
-                    // cursor to column 0 and puts the row count out.
+                // Decoded, not sniffed byte by byte: C1 controls arrive as two
+                // bytes in UTF-8, and U+009B is an eight-bit CSI — the very
+                // escape-sequence injection this filter exists to defuse — while
+                // U+0085 moves the cursor down a line and puts the row count
+                // out. A slice-length test lets both straight through.
+                const codepoint = std.unicode.utf8Decode(slice) catch
+                    std.unicode.replacement_character;
+
+                if (isControl(codepoint)) {
+                    // Control characters never reach the terminal. A text delta
+                    // is whatever a provider chose to send, and a raw ESC in it
+                    // is an escape-sequence injection into the user's terminal —
+                    // the same attack the decoder strips out of a paste. A stray
+                    // CR would be quieter and just as bad: it moves the cursor to
+                    // column 0 and puts the row count out.
                     //
                     // Tab is the one that carries meaning, and it is expanded
                     // rather than dropped so indented code keeps its shape.
-                    if (slice[0] == '\t') for (0..tab_width) |_| try state.space();
-                } else if (slice.len == 1 and slice[0] == ' ') {
+                    if (codepoint == '\t') for (0..tab_width) |_| try state.space();
+                } else if (codepoint == ' ') {
                     try state.space();
                 } else {
                     try state.push(slice, width_mod.stringWidth(slice));
@@ -657,6 +769,8 @@ test "a line wider than the terminal wraps at a space, not mid-word" {
     var sink: [4096]u8 = undefined;
     const painted = try paintOnce(&renderer, &buffer, &sink);
 
+    // Three content rows plus the status hint, which is cut to the ten columns
+    // it has rather than wrapping onto a second.
     try testing.expectEqual(@as(u32, 4), painted.frame.tail_rows);
     try testing.expect(std.mem.indexOf(u8, painted.output, "alpha\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, painted.output, "bravo\r\n") != null);
@@ -855,7 +969,7 @@ test "after a committed block the next paint moves back over nothing" {
     try testing.expectEqualStrings("\r\x1b[0J", after.output);
 }
 
-test "a narrower terminal rewraps the tail and nothing else" {
+test "a resize abandons the old tail rather than erasing rows it cannot count" {
     var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
     defer renderer.deinit();
     try renderer.beginBlock(.assistant);
@@ -870,11 +984,130 @@ test "a narrower terminal rewraps the tail and nothing else" {
     var buffer2: [4096]u8 = undefined;
     var sink2: [4096]u8 = undefined;
     const narrow = try paintOnce(&renderer, &buffer2, &sink2);
+
+    // The tail is rewrapped at the new width: three content rows plus the hint.
     try testing.expectEqual(@as(u32, 4), narrow.frame.tail_rows);
-    // The cursor-up is the count from the frame before, at the old width: the
-    // terminal reflowed those rows itself and tug does not second-guess it.
-    try testing.expect(std.mem.startsWith(u8, narrow.output, "\r\x1b[2F\x1b[0J"));
     try testing.expect(std.mem.indexOf(u8, narrow.output, "alpha\r\n") != null);
+
+    // And no cursor-up at all. The terminal rewrapped the rows already on
+    // screen, so the recorded count no longer describes them, and moving back
+    // over it would either strand rows or erase committed scrollback.
+    try testing.expect(std.mem.indexOf(u8, narrow.output, "F\x1b[0J") == null);
+}
+
+test "a height change alone still repaints normally" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("alpha\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    _ = try paintOnce(&renderer, &buffer, &sink);
+
+    renderer.setSize(.{ .cols = 20, .rows = 24 });
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const taller = try paintOnce(&renderer, &buffer2, &sink2);
+    try testing.expect(std.mem.startsWith(u8, taller.output, "\r\x1b[2F\x1b[0J"));
+}
+
+test "the status hint is cut to one row on a terminal narrower than itself" {
+    // Six columns against the hint's thirteen. Written unwrapped it would be
+    // wrapped by the terminal into three rows counted as one, and every later
+    // frame would move back two rows too few.
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 6, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+
+    try testing.expectEqual(@as(u32, 1), painted.frame.tail_rows);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "... st") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "streaming") == null);
+
+    var rows: u32 = 0;
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, painted.output, index, "\r\n")) |at| {
+        rows += 1;
+        index = at + 2;
+    }
+    try testing.expectEqual(painted.frame.tail_rows, rows);
+}
+
+test "a marker too wide for the terminal is dropped rather than overflowing" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 4, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    // "255. " is five cells; the terminal is four.
+    try renderer.feed("255. x\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "255. ") == null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "x") != null);
+}
+
+test "an eight-bit CSI in a text delta never reaches the terminal" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 40, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    // U+009B is CSI as a C1 control and arrives as two bytes in UTF-8; U+0085
+    // is NEL, which moves the cursor down a line. A filter that only looks at
+    // single-byte slices lets both straight through.
+    try renderer.feed("a\u{009b}31mb\u{0085}c\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "\u{009b}") == null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "\u{0085}") == null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "a31mbc") != null);
+}
+
+test "a forced split keeps a straddled codepoint whole" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 10, .rows = 5 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    // Enough to outgrow the screen, then a lead byte whose tail has not
+    // arrived. Splitting the whole buffer would bake a replacement character
+    // into scrollback, where nothing can ever repair it.
+    try renderer.feed("x" ** 300);
+    try renderer.feed("\xe6\x97");
+
+    var buffer: [16384]u8 = undefined;
+    var sink: [16384]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "\xe6\x97") == null);
+
+    try renderer.feed("\xa5\n");
+    var buffer2: [16384]u8 = undefined;
+    var sink2: [16384]u8 = undefined;
+    const done = try paintOnce(&renderer, &buffer2, &sink2);
+    try testing.expect(std.mem.indexOf(u8, done.output, "\u{65e5}") != null);
+}
+
+test "a forced split of a fence opener does not swallow it" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 10, .rows = 5 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    // A fence opener long enough to outgrow the screen before its newline.
+    // Routed through `finishLine` it would toggle the fence state, emit no
+    // line, and every byte of it would vanish.
+    try renderer.feed("```" ++ "z" ** 300);
+
+    var buffer: [16384]u8 = undefined;
+    var sink: [16384]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+
+    var count: usize = 0;
+    for (painted.output) |byte| {
+        if (byte == 'z') count += 1;
+    }
+    try testing.expectEqual(@as(usize, 300), count);
 }
 
 test "a notice block renders dim and plain, markdown untouched" {
