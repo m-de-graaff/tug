@@ -86,6 +86,19 @@ pub const Backend = struct {
     }
 };
 
+/// Makes the terminal read tug's output as UTF-8, and must be called before
+/// the first byte is written — including on the `--help` and `--version` paths,
+/// which never open a `Backend` at all. A no-op everywhere but Windows, where
+/// the console otherwise decodes with the machine's OEM code page.
+pub fn useUtf8() void {
+    implementation.useUtf8();
+}
+
+/// Undoes `useUtf8`. Also reached through `restoreForPanic`.
+pub fn restoreUtf8() void {
+    implementation.restoreUtf8();
+}
+
 /// Puts the terminal back from a context that has no `Backend` to hand: the
 /// panic handler and, on Windows, the console control handler.
 ///

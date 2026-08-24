@@ -129,6 +129,11 @@ pub fn open() (error{NotATerminal} || OpenError)!Impl {
     return .{ .fd = fd };
 }
 
+/// Nothing to do: a POSIX terminal has no code page to set, it has UTF-8.
+pub fn useUtf8() void {}
+
+pub fn restoreUtf8() void {}
+
 /// Puts the terminal back. Safe to call from a signal handler, from a panic,
 /// and more than once — which is exactly the set of ways it gets called.
 pub fn restoreGlobal() void {

@@ -53,6 +53,12 @@ const status_hint = "... streaming";
 /// than silently mis-counted.
 const min_cols: usize = 2;
 
+/// A tab is expanded to this many spaces before wrapping. Terminals advance to
+/// the next eight-column stop, which the renderer cannot reproduce without
+/// tracking absolute columns through a soft wrap; expanding here means the wrap
+/// arithmetic and the screen agree, which is the thing that must not drift.
+const tab_width: usize = 4;
+
 fn isPlain(style: md.Style) bool {
     return @as(u8, @bitCast(style)) == 0;
 }
@@ -251,6 +257,19 @@ pub const Renderer = struct {
         // cursor's parking row is never the top of the screen.
         const capacity: u32 = @max(1, @as(u32, self.size.rows) -| 2);
 
+        // A line that outgrows the screen before its newline arrives cannot be
+        // committed — it is still being written — and would leave a tail the
+        // cursor-up can no longer reach the top of. Ending it here splits the
+        // line and loses nothing: the bytes are all still on their way to
+        // scrollback, just as two lines instead of one.
+        //
+        // ponytail: the split lands wherever the wrap did, not at a word or a
+        // sentence. A provider that streams a screenful without a newline is
+        // getting the honest rendering of what it sent.
+        if (self.partial.items.len > 0 and try self.renderPartial(null) > capacity) {
+            try self.finishLine();
+        }
+
         try self.row_cache.resize(self.gpa, self.lines.items.len);
         var tail_total: u32 = 0;
         for (self.lines.items, self.row_cache.items) |entry, *rows| {
@@ -387,7 +406,18 @@ pub const Renderer = struct {
                 const slice = piece.bytes[index..end];
                 index = end;
 
-                if (slice.len == 1 and slice[0] == ' ') {
+                if (slice.len == 1 and slice[0] < 0x20 or (slice.len == 1 and slice[0] == 0x7f)) {
+                    // Control bytes never reach the terminal. A text delta is
+                    // whatever a provider chose to send, and a raw ESC in it is
+                    // an escape-sequence injection into the user's terminal —
+                    // the same attack the decoder strips out of a paste. A
+                    // stray CR would be quieter and just as bad: it moves the
+                    // cursor to column 0 and puts the row count out.
+                    //
+                    // Tab is the one that carries meaning, and it is expanded
+                    // rather than dropped so indented code keeps its shape.
+                    if (slice[0] == '\t') for (0..tab_width) |_| try state.space();
+                } else if (slice.len == 1 and slice[0] == ' ') {
                     try state.space();
                 } else {
                     try state.push(slice, width_mod.stringWidth(slice));
@@ -476,10 +506,11 @@ const Wrap = struct {
     }
 
     fn flushWord(self: *Wrap) Error!void {
-        if (self.word.items.len == 0) {
-            self.spaces = 0;
-            return;
-        }
+        // Pending spaces deliberately survive an empty flush. They are only
+        // ever emitted in front of a word, which is what drops them at a row
+        // break and at the end of a line -- and what lets a run of them
+        // accumulate, so indented code keeps its indentation.
+        if (self.word.items.len == 0) return;
         const after = self.current;
         if (self.column + self.spaces + self.word_cells > self.cols) {
             try self.newRow(self.word_style);
@@ -844,4 +875,54 @@ test "a one-row terminal still paints and still commits" {
     const painted = try paintOnce(&renderer, &buffer, &sink);
     try testing.expectEqual(@as(u32, 3), painted.frame.committed_rows);
     try testing.expectEqual(@as(u32, 1), painted.frame.tail_rows);
+}
+
+test "control bytes never reach the terminal" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 40, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("a\x1b[31mb\x07c\x7fd\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "\x1b[31m") == null);
+    // Only the ESC byte is a control character: `[31m` is ordinary text and
+    // stays, which is exactly the point -- the sequence is defused, not the
+    // provider's words.
+    try testing.expect(std.mem.indexOf(u8, painted.output, "a[31mbcd") != null);
+    try testing.expectEqual(@as(u32, 2), painted.frame.tail_rows);
+}
+
+test "a tab keeps indentation instead of disappearing" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 40, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("```\n\tindented\n```\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "    indented") != null);
+}
+
+test "a line that outgrows the screen before its newline is split, not lost" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 10, .rows = 5 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    // Thirty rows of content at ten columns, with no newline anywhere in it.
+    try renderer.feed("x" ** 300);
+
+    var buffer: [16384]u8 = undefined;
+    var sink: [16384]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+
+    // The tail still fits on screen, and every byte reached the frame.
+    try testing.expect(painted.frame.tail_rows <= 5);
+    try testing.expect(painted.frame.committed_rows > 0);
+    var count: usize = 0;
+    for (painted.output) |byte| {
+        if (byte == 'x') count += 1;
+    }
+    try testing.expectEqual(@as(usize, 300), count);
 }

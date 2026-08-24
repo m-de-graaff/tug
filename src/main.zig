@@ -61,6 +61,10 @@ const usage =
 const Command = enum { help, version, caps, debug_keys, shell };
 
 pub fn main(init: std.process.Init.Minimal) !void {
+    // Before any output, including the two paths that never open a terminal.
+    shell.backend.useUtf8();
+    defer shell.backend.restoreUtf8();
+
     var argv_buffer: [argv_buffer_size]u8 = undefined;
     var argv_allocator: std.heap.FixedBufferAllocator = .init(&argv_buffer);
     const argv = try init.args.toSlice(argv_allocator.allocator());
