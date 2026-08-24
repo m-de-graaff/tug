@@ -282,33 +282,101 @@ fn debugKeys(
     var decoder: shell.Decoder = .init(&scratch);
     decoder.setKittyActive(detected.kitty_keyboard);
 
-    var read_buffer: [1024]u8 = undefined;
-    var terminal_reader = terminal.reader(io, &read_buffer);
+    // Everything below is the Phase 3 loop with a two-line client hanging off
+    // it. That is the whole point of the phase: the echo is hardcoded, the
+    // machinery under it is not, and Phase 4's renderer replaces `onRender`
+    // without touching anything else.
+    var waker: shell.Waker = try .init();
+    defer waker.deinit();
+    terminal.setWakeHandle(waker.writeHandle());
 
-    while (true) {
-        const chunk = terminal_reader.interface.peekGreedy(1) catch break;
-        if (chunk.len == 0) break;
-        decoder.feed(chunk);
-        terminal_reader.interface.toss(chunk.len);
+    var bus: shell.core.Bus = .{};
+    var queue: shell.Queue = .{};
+    var scheduler: shell.core.Scheduler = .{};
 
-        while (decoder.next()) |event| {
-            switch (event) {
-                .key => |key_event| {
-                    if (key_event.mods.ctrl and key_event.key.eql(.{ .char = 'c' })) {
-                        try screen.writeAll("\r\n");
-                        return screen.flush();
-                    }
-                    try key_event.writeChord(screen);
-                    try screen.writeAll("\r\n");
-                },
-                .paste => |paste| {
-                    try screen.print("paste {d} bytes\r\n", .{paste.bytes.len});
-                },
-            }
-        }
-        try screen.flush();
-    }
+    var echo: KeyEcho = .{
+        .screen = screen,
+        .terminal = &terminal,
+        .last_size = terminal.size(),
+    };
+
+    var loop: shell.Loop = .{
+        .io = io,
+        .terminal = &terminal,
+        .waker = &waker,
+        .queue = &queue,
+        .bus = &bus,
+        .decoder = &decoder,
+        .scheduler = &scheduler,
+        .handlers = .{
+            .context = &echo,
+            .onInput = KeyEcho.onInput,
+            .onRender = KeyEcho.onRender,
+        },
+    };
+
+    try loop.run();
+    try screen.writeAll("\r\n");
+    try screen.flush();
 }
+
+/// The `--debug-keys` client: one line per decoded event, and ctrl+c stops.
+///
+/// Writing happens in `onInput` and flushing in `onRender`, which is not an
+/// accident — it is the same split the renderer will use, so the frame budget
+/// coalesces a burst of keystrokes into one write rather than one per key.
+const KeyEcho = struct {
+    screen: *std.Io.Writer,
+    terminal: *shell.Backend,
+    last_size: shell.Size,
+    failed: ?anyerror = null,
+
+    fn onInput(context: ?*anyopaque, event: shell.InputEvent) shell.loop.Flow {
+        const self: *KeyEcho = @ptrCast(@alignCast(context.?));
+
+        switch (event) {
+            .key => |key_event| {
+                if (key_event.mods.ctrl and key_event.key.eql(.{ .char = 'c' })) return .stop;
+                key_event.writeChord(self.screen) catch |err| {
+                    self.failed = err;
+                    return .stop;
+                };
+                self.screen.writeAll("\r\n") catch |err| {
+                    self.failed = err;
+                    return .stop;
+                };
+            },
+            .paste => |paste| {
+                self.screen.print("paste {d} bytes\r\n", .{paste.bytes.len}) catch |err| {
+                    self.failed = err;
+                    return .stop;
+                };
+            },
+        }
+        return .keep_going;
+    }
+
+    /// Reports a resize as well as flushing.
+    ///
+    /// The size is re-read here rather than carried on the wake, because the
+    /// wake carries nothing: `SIGWINCH` writes one byte and the loop asks the
+    /// terminal what happened. It is also the only Windows-compatible shape,
+    /// since there is no `SIGWINCH` there to carry anything on. Printing it
+    /// makes the phase's "wakes on resize" claim something you can watch rather
+    /// than something the code asserts about itself.
+    fn onRender(context: ?*anyopaque) anyerror!void {
+        const self: *KeyEcho = @ptrCast(@alignCast(context.?));
+        if (self.failed) |err| return err;
+
+        const current = self.terminal.size();
+        if (current.cols != self.last_size.cols or current.rows != self.last_size.rows) {
+            try self.screen.print("resize {d}x{d}\r\n", .{ current.cols, current.rows });
+            self.last_size = current;
+        }
+
+        try self.screen.flush();
+    }
+};
 
 const testing = std.testing;
 

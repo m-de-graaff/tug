@@ -21,6 +21,7 @@ pub const key = @import("input/key.zig");
 pub const decoder = @import("input/decoder.zig");
 pub const waiting = @import("loop/wait.zig");
 pub const queue = @import("loop/queue.zig");
+pub const loop = @import("loop/loop.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;
@@ -34,6 +35,7 @@ pub const InputEvent = key.InputEvent;
 pub const Decoder = decoder.Decoder;
 pub const Waker = waiting.Waker;
 pub const Queue = queue.Queue;
+pub const Loop = loop.Loop;
 
 test {
     std.testing.refAllDecls(@This());
