@@ -415,7 +415,9 @@ pub fn run(
     _ = try renderer.paint(screen);
     try screen.flush();
 
-    const detected = caps_mod.detect(setup.env, probe_mod.run(io, &terminal), terminal.size());
+    var probe_buffer: [probe_mod.buffer_bytes]u8 = undefined;
+    const probed = probe_mod.run(io, &terminal, &probe_buffer);
+    const detected = caps_mod.detect(setup.env, probed.probe, terminal.size());
     renderer.setCaps(detected);
     if (detected.bracketed_paste) try stack.push(screen, .bracketed_paste);
     if (detected.kitty_keyboard) try stack.push(screen, .kitty_keyboard);
@@ -423,6 +425,12 @@ pub fn run(
     var scratch: [4096]u8 = undefined;
     var decoder: decoder_mod.Decoder = .init(&scratch);
     decoder.setKittyActive(detected.kitty_keyboard);
+
+    // Anything typed while the terminal was deciding whether to answer. On a
+    // terminal that answers neither query the probe window is the full 50 ms,
+    // and dropping what arrived in it means dropping the first keystroke of
+    // every session.
+    if (probed.leftover.len > 0) decoder.feed(probed.leftover);
 
     var waker: waiting.Waker = try .init();
     defer waker.deinit();

@@ -79,7 +79,17 @@ pub const Impl = struct {
         raw.cc[@intFromEnum(posix.V.MIN)] = 1;
         raw.cc[@intFromEnum(posix.V.TIME)] = 0;
 
-        try posix.tcsetattr(self.fd, .FLUSH, raw);
+        // NOW rather than FLUSH, and the difference is a real defect rather
+        // than a preference: `TCSAFLUSH` discards input that has arrived and
+        // not yet been read, so anything typed between the process starting and
+        // this line is thrown away by the terminal driver. Nothing could notice
+        // before Phase 6, because there was nothing to type into. Now the first
+        // keystroke of a session is exactly what it eats.
+        //
+        // Restoring still flushes, deliberately: on the way out, what is
+        // unread is most likely a half-finished escape sequence in a protocol
+        // the next program does not speak.
+        try posix.tcsetattr(self.fd, .NOW, raw);
     }
 
     pub fn restore(self: *Impl) void {

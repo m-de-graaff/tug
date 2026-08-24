@@ -318,7 +318,10 @@ fn printCapabilities(
     try terminal.enterRaw();
     defer terminal.restore();
 
-    const probe = shell.probe.run(io, &terminal);
+    // `--caps` prints and exits, so anything typed during the probe belongs to
+    // whatever runs next, not to tug.
+    var probe_buffer: [shell.probe.buffer_bytes]u8 = undefined;
+    const probe = shell.probe.run(io, &terminal, &probe_buffer).probe;
     const detected = shell.caps.detect(readEnvironment(environ, gpa).caps, probe, terminal.size());
     try detected.write(out);
     try out.print("probe timeout      {d} ms\n", .{shell.modes.probe_timeout_ms});
@@ -350,8 +353,9 @@ fn debugKeys(
     var stack: shell.modes.Stack = .{};
     defer stack.popAll(screen);
 
-    const probe = shell.probe.run(io, &terminal);
-    const detected = shell.caps.detect(readEnvironment(environ, gpa).caps, probe, terminal.size());
+    var probe_buffer: [shell.probe.buffer_bytes]u8 = undefined;
+    const probed = shell.probe.run(io, &terminal, &probe_buffer);
+    const detected = shell.caps.detect(readEnvironment(environ, gpa).caps, probed.probe, terminal.size());
 
     if (detected.bracketed_paste) try stack.push(screen, .bracketed_paste);
     if (detected.kitty_keyboard) try stack.push(screen, .kitty_keyboard);
@@ -362,6 +366,8 @@ fn debugKeys(
     var scratch: [4096]u8 = undefined;
     var decoder: shell.Decoder = .init(&scratch);
     decoder.setKittyActive(detected.kitty_keyboard);
+    // The corpus-capture tool must not drop the keys it was opened to capture.
+    if (probed.leftover.len > 0) decoder.feed(probed.leftover);
 
     // Everything below is the Phase 3 loop with a two-line client hanging off
     // it. That is the whole point of the phase: the echo is hardcoded, the
@@ -495,7 +501,9 @@ fn runMock(
     var stack: shell.modes.Stack = .{};
     defer stack.popAll(screen);
 
-    const probe = shell.probe.run(io, &terminal);
+    // One turn and out: nobody is typing into this.
+    var probe_buffer: [shell.probe.buffer_bytes]u8 = undefined;
+    const probe = shell.probe.run(io, &terminal, &probe_buffer).probe;
     const detected = shell.caps.detect(readEnvironment(environ, gpa).caps, probe, terminal.size());
 
     var waker: shell.Waker = try .init();
