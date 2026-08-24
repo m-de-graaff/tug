@@ -98,8 +98,10 @@ const fence_body =
 
 const wide_text = "日本語のテキストも折り返します。 🚢 And back to *ASCII* again.";
 
-/// Where the generator is in the fixed tail of every response.
-const Phase = enum { text, usage, stop, done };
+/// Where the generator is in the fixed tail of every response. `failed` is the
+/// tail `midstream_error` takes instead: an error stop and no usage, because a
+/// stream that never finished has no token count worth reporting.
+const Phase = enum { text, usage, stop, failed, done };
 
 pub const Mock = struct {
     config: Config,
@@ -133,11 +135,23 @@ pub const Mock = struct {
     pub fn next(self: *Mock) ?proto.StreamEvent {
         switch (self.phase) {
             .text => {
+                if (self.config.fault == .midstream_error and
+                    self.emitted >= self.totalUnits() / 2)
+                {
+                    self.phase = .failed;
+                    return .{ .err = .{
+                        .kind = .server,
+                        .message = "the provider hung up mid-stream",
+                    } };
+                }
                 if (self.emitted >= self.totalUnits()) {
                     self.phase = .usage;
                     return self.next();
                 }
-                const text = self.renderUnit();
+                const text = if (self.config.fault == .oversized_chunk and self.emitted == 0)
+                    self.renderOversized()
+                else
+                    self.renderUnit();
                 self.emitted += 1;
                 self.bytes_out += @intCast(text.len);
                 return .{ .text_delta = text };
@@ -155,6 +169,10 @@ pub const Mock = struct {
                 self.phase = .done;
                 return .{ .stop = .{ .reason = .end_turn } };
             },
+            .failed => {
+                self.phase = .done;
+                return .{ .stop = .{ .reason = .err } };
+            },
             .done => return null,
         }
     }
@@ -164,6 +182,27 @@ pub const Mock = struct {
     /// documents.
     fn renderUnit(self: *Mock) []const u8 {
         return self.buffer[0..self.renderUnitInto(&self.buffer)];
+    }
+
+    /// One delta that fills the whole buffer.
+    ///
+    /// Repeats units rather than emitting eight kilobytes of the same byte,
+    /// because the point is a chunk the *renderer* has to wrap and the *queue*
+    /// has to split, not one a memcpy has to move.
+    ///
+    /// The remainder is padded with spaces. `renderUnitInto` never returns a
+    /// half-written unit, so `len` is always on a codepoint boundary and the
+    /// padding cannot cut one — which is what keeps the whole delta valid
+    /// UTF-8 while still being exactly the promised length.
+    fn renderOversized(self: *Mock) []const u8 {
+        var len: usize = 0;
+        while (len < max_delta_bytes) {
+            const written = self.renderUnitInto(self.buffer[len..]);
+            if (written == 0) break;
+            len += written;
+        }
+        @memset(self.buffer[len..], ' ');
+        return &self.buffer;
     }
 
     /// One unit into an arbitrary slice, or 0 when it would not fit whole. A
@@ -264,6 +303,55 @@ test "a clean stream ends with usage and then a stop" {
     }
     try testing.expectEqual(proto.StopReason.end_turn, last.?.stop.reason);
     try testing.expect(second_last.?.usage.output_tokens > 0);
+}
+
+test "midstream_error gives up halfway with an err and an error stop" {
+    var m: Mock = .init(.{ .seed = 4, .units = 8, .fault = .midstream_error });
+
+    var deltas: usize = 0;
+    var saw_err = false;
+    var stop_reason: ?proto.StopReason = null;
+    while (m.next()) |event| switch (event) {
+        .text_delta => deltas += 1,
+        .err => |e| {
+            saw_err = true;
+            try testing.expectEqual(proto.ErrKind.server, e.kind);
+            try testing.expect(e.message.len > 0);
+        },
+        .stop => |s| stop_reason = s.reason,
+        .usage => return error.UsageAfterFailure,
+    };
+
+    try testing.expect(saw_err);
+    try testing.expectEqual(proto.StopReason.err, stop_reason.?);
+    // Halfway: enough text to have committed a block, not the whole response.
+    try testing.expectEqual(@as(usize, 4), deltas);
+}
+
+test "oversized_chunk sends one delta far larger than a queue slot" {
+    var m: Mock = .init(.{ .seed = 5, .units = 3, .fault = .oversized_chunk });
+    const first = m.next().?.text_delta;
+    try testing.expectEqual(max_delta_bytes, first.len);
+    // And it is still valid UTF-8, so a renderer that chokes on it has choked
+    // on the size rather than on a malformed codepoint.
+    try testing.expect(std.unicode.utf8ValidateSlice(first));
+}
+
+test "empty says nothing and still ends properly" {
+    var m: Mock = .init(.{ .seed = 6, .fault = .empty });
+    try testing.expect(m.next().?.usage.output_tokens > 0);
+    try testing.expectEqual(proto.StopReason.end_turn, m.next().?.stop.reason);
+    try testing.expect(m.next() == null);
+}
+
+test "firehose emits megabytes" {
+    var m: Mock = .init(.{ .seed = 9, .fault = .firehose });
+    var total: usize = 0;
+    while (m.next()) |event| switch (event) {
+        .text_delta => |bytes| total += bytes.len,
+        else => {},
+    };
+    try testing.expect(total > 1024 * 1024);
 }
 
 test "fault names round-trip and unknown ones are rejected" {
