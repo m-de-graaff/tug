@@ -119,6 +119,10 @@ pub const History = struct {
     /// Set once something could not be written. Nothing reads it yet; Phase
     /// 10's `/config` is its consumer.
     write_failed: bool = false,
+    /// The first error behind `write_failed`, kept because "history is not
+    /// being saved" is not an actionable thing to tell someone and
+    /// "AccessDenied" is.
+    write_error: ?anyerror = null,
 
     /// The entry being shown, or null while the draft is the draft.
     browsing: ?usize = null,
@@ -138,6 +142,13 @@ pub const History = struct {
 
     pub fn count(self: *const History) usize {
         return self.entries.items.len;
+    }
+
+    /// Records a write failure, keeping the first error rather than the last:
+    /// the first one is the cause and the rest are usually its consequences.
+    fn failWrite(self: *History, err: anyerror) void {
+        self.write_failed = true;
+        if (self.write_error == null) self.write_error = err;
     }
 
     /// Reads the file, once, the first time anything needs it.
@@ -177,11 +188,9 @@ pub const History = struct {
         }
 
         // A file that has grown past the cap — an older tug, or a hand edit — is
-        // trimmed here rather than left to grow.
-        if (self.entries.items.len > max_entries) {
-            self.trim();
-            self.rewrite();
-        }
+        // trimmed here rather than left to grow. The next submission rewrites
+        // it; there is nothing to write yet.
+        self.trim();
     }
 
     /// Records a submission: in memory always, on disk when there is a path.
@@ -195,24 +204,18 @@ pub const History = struct {
             if (std.mem.eql(u8, last, text)) return;
         }
 
-        const owned = self.gpa.dupe(u8, text) catch {
-            self.write_failed = true;
+        const owned = self.gpa.dupe(u8, text) catch |err| {
+            self.failWrite(err);
             return;
         };
-        self.entries.append(self.gpa, owned) catch {
+        self.entries.append(self.gpa, owned) catch |err| {
             self.gpa.free(owned);
-            self.write_failed = true;
+            self.failWrite(err);
             return;
         };
 
-        if (self.entries.items.len > max_entries) {
-            self.trim();
-            // The cap needs the file rewritten anyway, so the append rides
-            // along inside it rather than happening twice.
-            self.rewrite();
-            return;
-        }
-        self.appendLine(text);
+        self.trim();
+        self.rewrite();
     }
 
     /// The previous entry, stashing the draft on the way in. Null means there
@@ -260,62 +263,29 @@ pub const History = struct {
         self.entries.items.len -= over;
     }
 
-    /// One entry onto the end of the file.
+    /// Writes the whole file from what is in memory.
     ///
-    /// There is no append mode and no seek in this standard library, so the
-    /// append is a length followed by a positional write at that offset. Two
-    /// tugs writing at once can interleave; the loser of that race loses one
-    /// entry, which is the correct amount of machinery to spend on a shell
-    /// history.
+    /// This replaced an append — a `length` followed by a positional write,
+    /// since this standard library has no append mode and no seek — because the
+    /// positional write did not survive contact with Windows, and because the
+    /// append was never buying much. The cap is 1,000 short lines, so a rewrite
+    /// is tens of kilobytes; it happens once per *submission*, not once per
+    /// keystroke, and a person cannot submit fast enough for that to matter.
+    /// `DR-012` records the trade with the number.
     ///
-    /// ponytail: no file lock. Add one if sessions start sharing a history and
-    /// anyone notices.
-    fn appendLine(self: *History, text: []const u8) void {
-        const path = self.path orelse return;
-        const dir: std.Io.Dir = .cwd();
-
-        if (parentOf(path)) |parent| {
-            dir.createDirPath(self.io, parent) catch {
-                self.write_failed = true;
-                return;
-            };
-        }
-
-        var line: std.ArrayList(u8) = .empty;
-        defer line.deinit(self.gpa);
-        encodeInto(&line, self.gpa, text) catch {
-            self.write_failed = true;
-            return;
-        };
-        line.append(self.gpa, '\n') catch {
-            self.write_failed = true;
-            return;
-        };
-
-        var file = dir.createFile(self.io, path, .{ .truncate = false }) catch {
-            self.write_failed = true;
-            return;
-        };
-        defer file.close(self.io);
-
-        const end = file.length(self.io) catch {
-            self.write_failed = true;
-            return;
-        };
-        file.writePositionalAll(self.io, line.items, end) catch {
-            self.write_failed = true;
-        };
-    }
-
-    /// Replaces the file with what is in memory. Used when the cap bites, which
-    /// is the one case an append cannot express.
+    /// The cap is applied by the caller before this runs, so truncating from
+    /// the front costs nothing extra: the file is being rewritten either way.
+    ///
+    /// ponytail: not atomic. A crash between truncate and write loses the
+    /// history rather than one entry. Write-to-temp-and-rename is the upgrade,
+    /// and it is worth taking the moment anything else in tug needs one.
     fn rewrite(self: *History) void {
         const path = self.path orelse return;
         const dir: std.Io.Dir = .cwd();
 
         if (parentOf(path)) |parent| {
-            dir.createDirPath(self.io, parent) catch {
-                self.write_failed = true;
+            dir.createDirPath(self.io, parent) catch |err| {
+                self.failWrite(err);
                 return;
             };
         }
@@ -323,18 +293,18 @@ pub const History = struct {
         var buffer: std.ArrayList(u8) = .empty;
         defer buffer.deinit(self.gpa);
         for (self.entries.items) |entry| {
-            encodeInto(&buffer, self.gpa, entry) catch {
-                self.write_failed = true;
+            encodeInto(&buffer, self.gpa, entry) catch |err| {
+                self.failWrite(err);
                 return;
             };
-            buffer.append(self.gpa, '\n') catch {
-                self.write_failed = true;
+            buffer.append(self.gpa, '\n') catch |err| {
+                self.failWrite(err);
                 return;
             };
         }
 
-        dir.writeFile(self.io, .{ .sub_path = path, .data = buffer.items }) catch {
-            self.write_failed = true;
+        dir.writeFile(self.io, .{ .sub_path = path, .data = buffer.items }) catch |err| {
+            self.failWrite(err);
         };
     }
 };
@@ -545,6 +515,9 @@ test "entries survive a restart, multiline ones included" {
         history.ensureLoaded();
         history.append("single line");
         history.append("first\nsecond");
+        if (history.write_error) |err| {
+            std.debug.print("history write failed at {s}: {t}\n", .{ path, err });
+        }
         try testing.expect(!history.write_failed);
     }
 
@@ -602,6 +575,7 @@ test "a path that cannot be written records the failure and keeps going" {
     history.append("this goes nowhere");
 
     try testing.expect(history.write_failed);
+    try testing.expect(history.write_error != null);
     // In memory it is still there, so the session behaves normally.
     try testing.expectEqual(@as(usize, 1), history.count());
 }

@@ -53,18 +53,32 @@ either.
 
 ## Options for the write
 
-**Rewrite the file on every submission.** Rejected: O(n) per submission, for a
-file that only ever grows at the end.
+**Append one line, and rewrite only when the cap bites.** Chosen first, and then
+reversed — see below.
 
-**Append one line, and rewrite only when the cap bites.** Chosen. The cap is
-1,000 entries and it truncates from the front, which is the only truncation that
-keeps what a person is likely to want; that case needs a rewrite anyway, so the
-append rides along inside it.
+**Rewrite the file on every submission.** Chosen, in the end.
 
-There is no append mode and no seek in this standard library, so an append is
-`file.length` followed by `writePositionalAll` at that offset. Two tugs writing
-at once can therefore interleave, and the loser of that race loses one entry. A
-file lock is the fix, and it is not worth writing until someone notices.
+The first version appended: there is no append mode and no seek in this standard
+library, so it was `file.length` followed by `writePositionalAll` at that
+offset. It worked on Linux and failed on Windows, where the positional write
+goes through `NtWriteFile` with an explicit byte offset and did not survive
+contact with a handle opened the way `createFile` opens one.
+
+Rather than special-case a platform, the append went away. The argument against
+rewriting was O(n) per submission, and the n is worth saying out loud: the cap
+is 1,000 entries of a line each, so a rewrite is tens of kilobytes, and it
+happens once per **submission** rather than once per keystroke. A person cannot
+submit fast enough for that to cost anything measurable. The append was buying
+an optimization against a bound that is already small.
+
+What it costs is atomicity, which the append did not have either: a crash
+between the truncate and the write loses the file rather than one entry.
+Write-to-temp-and-rename is the upgrade, and it is worth taking the moment
+anything else in tug needs one.
+
+Two tugs writing at once still clash, and now the loser overwrites rather than
+interleaves. A file lock remains the fix, and remains not worth writing until
+someone notices.
 
 ## Decision on failure
 
@@ -81,10 +95,12 @@ than invisible.
 ## Consequences
 
 **Easy:** `cat ~/.local/state/tug/history` works and shows one submission per
-line. Appends are O(1). A session with no writable state directory behaves
-normally. Nothing is read until `up` is pressed.
+line. A session with no writable state directory behaves normally. Nothing is
+read until `up` is pressed. One write path rather than two, on every platform.
 
-**Hard:** the escape format is now a compatibility surface. v0.4's sessions
+**Hard:** a submission rewrites the file, so the write is not atomic and a
+concurrent session overwrites rather than interleaves. And the escape format is
+now a compatibility surface. v0.4's sessions
 (`tugsession`, JSONL) are a different store for a different thing, and must not
 quietly replace this one without a migration.
 

@@ -196,8 +196,10 @@ byte for byte, which is how the change was kept to its own path.
 
 **History** is one entry per line in the XDG state directory, with backslash and
 newline escaped so a multiline draft stays one line in the file (`DR-012`).
-Appends are a length plus a positional write, because this standard library has
-no append mode and no seek. Nothing is read until the first press of `up`.
+A submission rewrites the file: the first version appended with a positional
+write, which failed on Windows, and the cap is 1,000 short lines once per
+submission rather than per keystroke, so the append was optimising against a
+bound that is already small (`DR-012`). Nothing is read until the first `up`.
 Every filesystem error is swallowed: a shell that refused to start because
 `$HOME` was read-only would be the worse bug.
 
