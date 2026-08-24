@@ -20,6 +20,7 @@ pub const modes = @import("term/modes.zig");
 pub const key = @import("input/key.zig");
 pub const decoder = @import("input/decoder.zig");
 pub const waiting = @import("loop/wait.zig");
+pub const queue = @import("loop/queue.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;
@@ -32,6 +33,7 @@ pub const PasteEvent = key.PasteEvent;
 pub const InputEvent = key.InputEvent;
 pub const Decoder = decoder.Decoder;
 pub const Waker = waiting.Waker;
+pub const Queue = queue.Queue;
 
 test {
     std.testing.refAllDecls(@This());
