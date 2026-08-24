@@ -227,11 +227,52 @@ the script pins the behaviour they cannot see.
 Cost: 15,992 bytes, taking the binary to 155,584 — 30 % of the 500 KiB budget.
 Tests go from 185 to 261.
 
+### Milestone 4 «It's yours» — Phase 7
+
+**Phase 7, config foundation.** Configuration layers: defaults, then
+`~/.config/tug/config.toml`, then `./.tug/config.toml`, then `TUG_*`, then
+flags. Every resolved value remembers which layer set it, and `--debug-config`
+prints that column — which is Phase 10's `/config` arriving early through a
+debug flag, the way `--caps` did for the terminal matrix.
+
+**tug's config is a TOML subset, not TOML** (`DR-006`). Both vendorable
+candidates parse into an allocated value tree and neither documents a line and
+column in its errors, which is the one thing this phase exists to provide; and
+vendoring was required either way, so the choice was only ever about which body
+of code this repo maintains against a pinned compiler. What it maintains is 330
+lines. Refused, each by name and with a position: floats, dates, arrays, inline
+tables, arrays of tables, dotted keys, and escape sequences. The last of those
+is a design rather than an omission — every string the scanner yields is a slice
+of the source, which is what keeps it allocation-free, and a decoded escape
+would need a buffer with an owner.
+
+**Nothing in the stack has an error set.** Not the scanner, not the merge, not
+the loader. A config file full of nonsense produces a config of defaults and a
+list of warnings; a value of the wrong type keeps the value that was already
+there. The spec asks that a typo in a keybind never brick the shell, and the way
+to guarantee that is for the failure path not to exist. The capacities are fixed
+for the same reason: a growable list needs an allocator, an allocator needs a
+failure path, and the failure path in a config loader is the code nobody tests.
+
+The config is read after the first paint, for the reason the capability probe
+is: the cold-start budget is 10 ms and two file reads are not free.
+
+Two settings ship with it that no phase asked for — `[history] enabled` and
+`[history] max_entries` — because `theme` and `[keys]` have no consumer until
+Phases 8 and 9, and a parser nothing reads is a parser nothing tests. They are
+also what let `scripts/editor-session.sh` check the thing `--debug-config`
+cannot: that the shell uses what the loader loaded.
+
+Cost: 17,504 bytes, taking the binary to 173,088 — 33 % of the 500 KiB budget,
+and 34 % of `DR-006`'s own 50 KiB bar for the whole config stack. Tests go from
+261 to 296.
+
 ### Not yet
 
-The editor, config, keymaps, themes and commands — Phases 6
-to 11. `tug` with no arguments prints its usage rather than pretending to be a
-shell. And no terminal emulator has yet watched the renderer stream: the
+Keymaps, themes and commands — Phases 8 to 11. `theme` and `[keys]` are parsed
+and carried with their provenance and read by nobody yet. No command-line flag
+writes a config key, so the top layer of the layering is exercised only by a
+test. And no terminal emulator has yet watched the renderer stream: the
 no-flicker eyeball test in kitty and alacritty is Phase 4's stated exit
 criterion and is still open.
 
