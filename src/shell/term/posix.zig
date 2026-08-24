@@ -22,7 +22,7 @@ const backend = @import("backend.zig");
 const Size = backend.Size;
 
 pub const Handle = posix.fd_t;
-pub const OpenError = error{};
+pub const OpenError = error{Unexpected};
 pub const RawError = posix.TermiosGetError || posix.TermiosSetError;
 
 /// The terminal state to put back, and whether it still needs putting back.
@@ -111,7 +111,17 @@ pub const Impl = struct {
 
 pub fn open() (error{NotATerminal} || OpenError)!Impl {
     const fd = posix.STDIN_FILENO;
-    if (!posix.isatty(fd)) return error.NotATerminal;
+
+    // `tcgetattr` succeeding is the isatty test, and it is the same call raw
+    // mode makes first, so this costs nothing extra. It can also fail for
+    // reasons that are not "this is a pipe" — a closed controlling terminal,
+    // an IO error on the line — which is why `Unexpected` is a real outcome
+    // here rather than a placeholder.
+    _ = posix.tcgetattr(fd) catch |err| switch (err) {
+        error.NotATerminal => return error.NotATerminal,
+        else => return error.Unexpected,
+    };
+
     return .{ .fd = fd };
 }
 
@@ -129,7 +139,7 @@ pub fn restoreGlobal() void {
     posix.tcsetattr(fd, .FLUSH, saved_termios) catch {};
 }
 
-fn onFatalSignal(sig: i32) callconv(.c) void {
+fn onFatalSignal(sig: posix.SIG) callconv(.c) void {
     restoreGlobal();
 
     // Restore the default disposition and re-raise, so the process dies of what
@@ -140,11 +150,11 @@ fn onFatalSignal(sig: i32) callconv(.c) void {
         .mask = posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(@enumFromInt(sig), &default_action, null);
-    posix.raise(@enumFromInt(sig)) catch {};
+    posix.sigaction(sig, &default_action, null);
+    posix.raise(sig) catch {};
 }
 
-fn onWindowChange(sig: i32) callconv(.c) void {
+fn onWindowChange(sig: posix.SIG) callconv(.c) void {
     _ = sig;
 
     // The only async-signal-safe thing a resize handler may do: write one byte
