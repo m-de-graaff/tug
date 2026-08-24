@@ -187,7 +187,6 @@ extern "kernel32" fn CreateEventW(
     name: ?[*:0]const u16,
 ) callconv(.winapi) ?windows.HANDLE;
 extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
-extern "kernel32" fn CloseHandle(object: windows.HANDLE) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn WaitForMultipleObjects(
     count: windows.DWORD,
     handles: [*]const windows.HANDLE,
@@ -205,7 +204,8 @@ fn waitWindows(input: Handle, wake: ?Handle, timeout_ms: ?u32) Error!Ready {
     }
 
     const timeout: windows.DWORD = if (timeout_ms) |ms| ms else INFINITE;
-    const result = WaitForMultipleObjects(count, &handles, 0, timeout);
+    // `.FALSE`, not 0: windows.BOOL is an enum in Zig 0.16, not a c_int.
+    const result = WaitForMultipleObjects(count, &handles, .FALSE, timeout);
 
     if (result == WAIT_TIMEOUT) return .{};
     if (result == WAIT_FAILED) return error.Unexpected;
@@ -225,12 +225,12 @@ const WindowsWaker = struct {
     fn init() Error!WindowsWaker {
         // Auto-reset, initially unsignalled: the wait itself consumes the
         // signal, which is why `drain` has nothing to do here.
-        const event = CreateEventW(null, 0, 0, null) orelse return error.Unexpected;
+        const event = CreateEventW(null, .FALSE, .FALSE, null) orelse return error.Unexpected;
         return .{ .event = event };
     }
 
     fn deinit(self: *WindowsWaker) void {
-        _ = CloseHandle(self.event);
+        windows.CloseHandle(self.event);
     }
 
     fn readHandle(self: *const WindowsWaker) windows.HANDLE {

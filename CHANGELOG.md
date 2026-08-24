@@ -40,7 +40,7 @@ per query.
 the cross-thread queue, publish, render if dirty. It blocks in exactly one
 place, and the timeout it waits with is the CPU budget — with nothing dirty and
 no half-decoded sequence in hand there is no deadline at all, so an idle tug
-consumes nothing. Measured: zero CPU ticks over five seconds parked, at 1.75 MiB
+consumes nothing. Measured: zero CPU ticks over five seconds parked, at 256 KiB
 resident.
 
 A typed event bus in `tugcore`, tagged by the event catalog so the compiler
