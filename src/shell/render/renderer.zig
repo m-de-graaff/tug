@@ -243,13 +243,17 @@ pub const Renderer = struct {
         return style;
     }
 
-    fn marker(entry: Entry, buffer: []u8) []const u8 {
-        if (entry.block != .assistant) return "";
-        return switch (entry.line.kind) {
+    fn markerFor(kind: md.LineKind, level: u8, buffer: []u8) []const u8 {
+        return switch (kind) {
             .bullet => "\u{2022} ",
-            .ordered => std.fmt.bufPrint(buffer, "{d}. ", .{entry.line.level}) catch "- ",
+            .ordered => std.fmt.bufPrint(buffer, "{d}. ", .{level}) catch "- ",
             else => "",
         };
+    }
+
+    fn marker(entry: Entry, buffer: []u8) []const u8 {
+        if (entry.block != .assistant) return "";
+        return markerFor(entry.line.kind, entry.line.level, buffer);
     }
 
     pub fn paint(self: *Renderer, out: *std.Io.Writer) Error!Frame {
@@ -339,14 +343,35 @@ pub const Renderer = struct {
         const usable = self.partial.items[0..completePrefix(self.partial.items)];
         if (usable.len == 0) return 0;
 
-        const kind = self.block orelse .assistant;
-        const style: md.Style = if (self.in_fence or kind == .notice)
-            .{ .dim = true }
-        else if (kind == .user)
-            .{ .bold = true }
-        else
-            .{};
-        const rows = try self.wrap(usable, style, "", kind != .assistant or self.in_fence, out);
+        const block = self.block orelse .assistant;
+
+        var content = usable;
+        var marker_buffer: [8]u8 = undefined;
+        var marker_text: []const u8 = "";
+        var style: md.Style = .{};
+        var literal = true;
+
+        switch (block) {
+            .user => style.bold = true,
+            .notice => style.dim = true,
+            .assistant => if (self.in_fence) {
+                style.dim = true;
+            } else {
+                // Block classification is a prefix scan, so it is already
+                // decided on a line that has only half arrived: `# ` is a
+                // heading whether or not its newline has turned up. Inline
+                // spans are the part that has to wait, because `**` is only
+                // emphasis once it closes — which is the whole of what "hold
+                // back the trailing incomplete line" buys.
+                const classified = md.classify(content, false);
+                content = content[@min(classified.marker_len, content.len)..];
+                marker_text = markerFor(classified.kind, classified.level, &marker_buffer);
+                if (classified.kind == .heading) style.bold = true;
+                literal = false;
+            },
+        }
+
+        const rows = try self.wrap(content, style, marker_text, literal, out);
         if (out) |writer| try writer.writeAll("\r\n");
         return rows;
     }
@@ -382,11 +407,13 @@ pub const Renderer = struct {
         };
         self.word.clearRetainingCapacity();
 
-        if (out) |writer| {
-            var style_buffer: [16]u8 = undefined;
-            try writer.writeAll(styleBytes(.{}, base, &style_buffer));
-            try writer.writeAll(marker_text);
-        }
+        // The marker is emitted unstyled; the line's own style opens right
+        // after it, so a bullet never carries the emphasis of the sentence
+        // beside it while a code line's leading indent still gets the code
+        // style. Inline changes *within* the line are held back to the word
+        // they apply to — see `Wrap.setStyle`.
+        if (out) |writer| try writer.writeAll(marker_text);
+        try state.emitStyle(base);
 
         var pieces: md.Inline = .init(content, base);
         var literal_done = false;
@@ -425,11 +452,7 @@ pub const Renderer = struct {
             }
         }
         try state.flushWord();
-
-        if (out) |writer| {
-            var style_buffer: [16]u8 = undefined;
-            try writer.writeAll(styleBytes(state.current, .{}, &style_buffer));
-        }
+        try state.emitStyle(.{});
         return state.rows;
     }
 
@@ -467,7 +490,13 @@ const Wrap = struct {
     hanging: usize,
     column: usize,
     rows: u32 = 1,
-    /// The style the terminal is actually in.
+    /// What the terminal has actually been told. Distinct from `current`
+    /// because a style change is held back until the word it applies to is
+    /// emitted — otherwise the space in front of that word gets the new style,
+    /// which is invisible with an attribute and a stray painted cell once
+    /// Phase 9 makes it a background colour.
+    emitted: md.Style = .{},
+    /// The style in force at the end of the pending word.
     current: md.Style,
     /// The style in force where the pending word begins, so a row break can
     /// re-open it before replaying the word.
@@ -477,63 +506,76 @@ const Wrap = struct {
     /// not leave trailing whitespace in scrollback.
     spaces: usize = 0,
 
+    /// Moves the terminal to `style`, if it is not already there.
+    fn emitStyle(self: *Wrap, style: md.Style) Error!void {
+        if (@as(u8, @bitCast(style)) == @as(u8, @bitCast(self.emitted))) return;
+        if (self.out) |writer| {
+            var buffer: [16]u8 = undefined;
+            try writer.writeAll(styleBytes(self.emitted, style, &buffer));
+        }
+        self.emitted = style;
+    }
+
     fn setStyle(self: *Wrap, style: md.Style) Error!void {
         if (@as(u8, @bitCast(style)) == @as(u8, @bitCast(self.current))) return;
-        var buffer: [16]u8 = undefined;
-        const bytes = styleBytes(self.current, style, &buffer);
         if (self.word.items.len == 0) {
+            // Nothing pending: the change belongs to the next word, and is
+            // emitted when that word is.
             self.word_style = style;
-            if (self.out) |writer| try writer.writeAll(bytes);
         } else {
-            // Mid-word: the escape rides along with the word so a row break
+            // Mid-word: the escape rides along inside the word so a row break
             // replays it in the right place.
-            try self.word.appendSlice(self.gpa, bytes);
+            var buffer: [16]u8 = undefined;
+            try self.word.appendSlice(self.gpa, styleBytes(self.current, style, &buffer));
         }
         self.current = style;
     }
 
     fn newRow(self: *Wrap, restore: md.Style) Error!void {
+        try self.emitStyle(.{});
         if (self.out) |writer| {
-            var buffer: [16]u8 = undefined;
-            try writer.writeAll(styleBytes(self.current, .{}, &buffer));
             try writer.writeAll("\r\n");
             for (0..self.hanging) |_| try writer.writeAll(" ");
-            try writer.writeAll(styleBytes(.{}, restore, &buffer));
         }
+        try self.emitStyle(restore);
         self.rows += 1;
         self.column = self.hanging;
-        self.current = restore;
     }
 
     fn flushWord(self: *Wrap) Error!void {
         // Pending spaces deliberately survive an empty flush. They are only
         // ever emitted in front of a word, which is what drops them at a row
-        // break and at the end of a line -- and what lets a run of them
+        // break and at the end of a line — and what lets a run of them
         // accumulate, so indented code keeps its indentation.
         if (self.word.items.len == 0) return;
-        const after = self.current;
+
         if (self.column + self.spaces + self.word_cells > self.cols) {
             try self.newRow(self.word_style);
-        } else if (self.spaces > 0) {
-            if (self.out) |writer| for (0..self.spaces) |_| try writer.writeAll(" ");
-            self.column += self.spaces;
+        } else {
+            if (self.spaces > 0) {
+                if (self.out) |writer| for (0..self.spaces) |_| try writer.writeAll(" ");
+                self.column += self.spaces;
+            }
+            try self.emitStyle(self.word_style);
         }
         self.spaces = 0;
 
         if (self.out) |writer| try writer.writeAll(self.word.items);
+        // The word replayed its own mid-word escapes, so the terminal is now
+        // wherever the word ended.
+        self.emitted = self.current;
         self.column += self.word_cells;
-        self.current = after;
 
         self.word.clearRetainingCapacity();
         self.word_cells = 0;
-        self.word_style = after;
+        self.word_style = self.current;
     }
 
     fn space(self: *Wrap) Error!void {
         try self.flushWord();
         self.spaces += 1;
         if (self.column + self.spaces > self.cols) {
-            try self.newRow(self.current);
+            try self.newRow(.{});
             self.spaces = 0;
         }
     }
@@ -925,4 +967,52 @@ test "a line that outgrows the screen before its newline is split, not lost" {
         if (byte == 'x') count += 1;
     }
     try testing.expectEqual(@as(usize, 300), count);
+}
+
+test "a half-arrived line is already classified at block level" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 40, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    // No newline yet: the marker is decided by a prefix scan, so it does not
+    // have to wait for one. Without this the bullet shows as a literal "- " and
+    // then jumps to a dot the instant the line ends, which is a visible flinch
+    // on every list a model streams.
+    try renderer.feed("- half a bul");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "\u{2022} half a bul") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "- half") == null);
+}
+
+test "a half-arrived heading is already bold" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 40, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("## Half a hea");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const painted = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "\x1b[1mHalf a hea") != null);
+    try testing.expect(std.mem.indexOf(u8, painted.output, "##") == null);
+}
+
+test "inline markers in a half-arrived line stay literal until the line ends" {
+    var renderer: Renderer = .init(testing.allocator, test_caps, .{ .cols = 40, .rows = 10 });
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+    try renderer.feed("some **bold");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const open = try paintOnce(&renderer, &buffer, &sink);
+    try testing.expect(std.mem.indexOf(u8, open.output, "some **bold") != null);
+
+    try renderer.feed("** text\n");
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const closed = try paintOnce(&renderer, &buffer2, &sink2);
+    try testing.expect(std.mem.indexOf(u8, closed.output, "\x1b[1mbold\x1b[0m text") != null);
 }

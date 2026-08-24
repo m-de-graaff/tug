@@ -14,6 +14,7 @@ const std = @import("std");
 const core = @import("tugcore");
 const shell = @import("tugshell");
 const panic_handler = @import("panic.zig");
+const demo_script = @import("shell/render/demo.zig");
 
 pub const panic = panic_handler.handler;
 
@@ -55,10 +56,11 @@ const usage =
     \\debugging:
     \\  --caps           Print detected terminal capabilities and exit.
     \\  --debug-keys     Echo decoded key events until ctrl+c.
+    \\  --debug-render   Stream a hardcoded markdown burst until ctrl+c.
     \\
 ;
 
-const Command = enum { help, version, caps, debug_keys, shell };
+const Command = enum { help, version, caps, debug_keys, debug_render, shell };
 
 pub fn main(init: std.process.Init.Minimal) !void {
     // Before any output, including the two paths that never open a terminal.
@@ -95,6 +97,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return stdout.flush();
         },
         .debug_keys => return debugKeys(io, stdout, init.environ, environment_allocator.allocator()),
+        .debug_render => return debugRender(io, stdout, init.environ, environment_allocator.allocator()),
         .shell => {
             // Phases 3 onward. Until the loop and the renderer exist there is
             // nothing to drop the user into, and pretending otherwise would be
@@ -111,6 +114,7 @@ fn parseCommand(argv: []const [:0]const u8) Command {
         if (eqlAny(arg, &.{ "--version", "-V" })) return .version;
         if (eqlAny(arg, &.{ "--help", "-h" })) return .help;
         if (eqlAny(arg, &.{"--caps"})) return .caps;
+        if (eqlAny(arg, &.{"--debug-render"})) return .debug_render;
         if (eqlAny(arg, &.{"--debug-keys"})) return .debug_keys;
     }
     return .shell;
@@ -382,6 +386,153 @@ const KeyEcho = struct {
     }
 };
 
+/// Streams a hardcoded markdown burst through the renderer until ctrl+c.
+///
+/// The eyeball test for Phase 4, and the last hardcoded client before Phase 5
+/// replaces the script with a real mock provider. Everything below the burst is
+/// the Phase 3 loop unchanged: the demo hangs off `onRender` and pushes onto the
+/// same queue a provider thread will, so what is being watched is the machinery
+/// rather than a special path built to look good.
+fn debugRender(
+    io: std.Io,
+    out: *std.Io.Writer,
+    environ: std.process.Environ,
+    gpa: std.mem.Allocator,
+) !void {
+    var terminal = shell.backend.open() catch |err| switch (err) {
+        error.NotATerminal => {
+            try out.writeAll("not a terminal: nothing to render into\n");
+            return out.flush();
+        },
+        else => return err,
+    };
+
+    try terminal.enterRaw();
+    defer terminal.restore();
+
+    // Sized so a whole frame fits without an intermediate flush. That sizing is
+    // the one-write-per-frame invariant as it reaches a real terminal; the
+    // counting-writer test proves the renderer stays inside it.
+    var frame_buffer: [256 * 1024]u8 = undefined;
+    var terminal_writer = terminal.writer(io, &frame_buffer);
+    const screen = &terminal_writer.interface;
+
+    var stack: shell.modes.Stack = .{};
+    defer stack.popAll(screen);
+
+    const probe = probeCapabilities(io, &terminal);
+    const detected = shell.caps.detect(readEnv(environ, gpa), probe, terminal.size());
+
+    var waker: shell.Waker = try .init();
+    defer waker.deinit();
+    terminal.setWakeHandle(waker.writeHandle());
+
+    var bus: shell.core.Bus = .{};
+    var queue: shell.Queue = .{};
+    var scheduler: shell.core.Scheduler = .{};
+
+    var scratch: [4096]u8 = undefined;
+    var decoder: shell.Decoder = .init(&scratch);
+
+    // The renderer is the first thing in tug that allocates. A debug flag that
+    // runs for a few seconds and exits does not need leak detection on top of
+    // what the unit tests already do with `std.testing.allocator`.
+    var renderer: shell.Renderer = .init(std.heap.smp_allocator, detected, terminal.size());
+    defer renderer.deinit();
+    try renderer.beginBlock(.assistant);
+
+    var demo: RenderDemo = .{
+        .io = io,
+        .renderer = &renderer,
+        .screen = screen,
+        .terminal = &terminal,
+        .queue = &queue,
+        .waker = &waker,
+    };
+
+    // The first frame is owed before anything has happened.
+    scheduler.markDirty();
+
+    var loop: shell.Loop = .{
+        .io = io,
+        .terminal = &terminal,
+        .waker = &waker,
+        .queue = &queue,
+        .bus = &bus,
+        .decoder = &decoder,
+        .scheduler = &scheduler,
+        .handlers = .{
+            .context = &demo,
+            .onInput = RenderDemo.onInput,
+            .onRender = RenderDemo.onRender,
+        },
+    };
+
+    try loop.run();
+    try screen.writeAll("\r\n");
+    try screen.flush();
+}
+
+/// The `--debug-render` client.
+///
+/// Feeds a few chunks, paints, and then rings the waker with an event on the
+/// queue so the loop comes back round. Going through the queue rather than
+/// painting in a tight loop is what keeps the frame budget in play: a queued
+/// delta marks the scheduler dirty rather than urgent, so the burst coalesces
+/// to about 125 frames a second no matter how fast it is fed.
+const RenderDemo = struct {
+    io: std.Io,
+    renderer: *shell.Renderer,
+    screen: *std.Io.Writer,
+    terminal: *shell.Backend,
+    queue: *shell.Queue,
+    waker: *shell.Waker,
+    offset: usize = 0,
+    finished: bool = false,
+
+    fn onInput(context: ?*anyopaque, event: shell.InputEvent) shell.loop.Flow {
+        _ = context;
+        return switch (event) {
+            .key => |key_event| if (key_event.mods.ctrl and key_event.key.eql(.{ .char = 'c' }))
+                .stop
+            else
+                .keep_going,
+            .paste => .keep_going,
+        };
+    }
+
+    fn onRender(context: ?*anyopaque) anyerror!void {
+        const self: *RenderDemo = @ptrCast(@alignCast(context.?));
+
+        // Asked for every frame rather than tracked. A resize wakes the loop and
+        // carries no payload — `SIGWINCH` writes one byte and nothing else — so
+        // one `ioctl` a frame is cheaper than the bookkeeping that would avoid
+        // it, and it is the only shape Windows can follow.
+        self.renderer.setSize(self.terminal.size());
+
+        for (0..demo_script.chunks_per_frame) |_| {
+            if (self.offset >= demo_script.script.len) break;
+            const end = @min(self.offset + demo_script.chunk_bytes, demo_script.script.len);
+            try self.renderer.feed(demo_script.script[self.offset..end]);
+            self.offset = end;
+        }
+        if (self.offset >= demo_script.script.len and !self.finished) {
+            try self.renderer.endBlock();
+            self.finished = true;
+        }
+
+        _ = try self.renderer.paint(self.screen);
+        try self.screen.flush();
+
+        if (self.finished) return;
+
+        // More to say. The queue and the waker are the same pair a provider
+        // thread will use in Phase 5.
+        self.queue.push(self.io, .{ .stream_delta = .{ .text = "" } }) catch {};
+        self.waker.wake();
+    }
+};
+
 const testing = std.testing;
 
 test "the version fast path writes the built version" {
@@ -408,6 +559,7 @@ test "commands are recognized and the default is the shell" {
         .{ .args = &.{ "tug", "--help" }, .want = .help },
         .{ .args = &.{ "tug", "--caps" }, .want = .caps },
         .{ .args = &.{ "tug", "--debug-keys" }, .want = .debug_keys },
+        .{ .args = &.{ "tug", "--debug-render" }, .want = .debug_render },
     };
     for (cases) |case| {
         try testing.expectEqual(case.want, parseCommand(case.args));
