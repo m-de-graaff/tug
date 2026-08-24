@@ -298,6 +298,12 @@ test "a drain returns even against a producer that never stops" {
     var queue: Queue = .{};
     var running: std.atomic.Value(bool) = .init(true);
 
+    // Filled here rather than left to the producer thread. Waiting for that
+    // thread to be scheduled is not something a test may assume: on a
+    // two-core CI runner a spinning consumer starves it indefinitely, and an
+    // assertion that it ran is then a coin toss rather than a check.
+    for (0..capacity) |_| try queue.push(io, .{ .stream_delta = .{ .text = "x" } });
+
     // A producer that refills the ring as fast as it empties. Draining until
     // `pop` returns null against this never returns, and the loop that is
     // supposed to be painting between drains never paints. Before the bound,
@@ -317,18 +323,18 @@ test "a drain returns even against a producer that never stops" {
         thread.join();
     }
 
-    // Each of these has to come back. If any one of them hangs, the test times
-    // out rather than failing — which is itself the signal. The loop runs until
-    // the producer has been scheduled at least once, because a drain that
-    // returned only because the queue was still empty proves nothing.
-    var rounds: usize = 0;
-    while (recorder.count == 0 and rounds < 10_000) : (rounds += 1) {
-        try testing.expect(queue.drainInto(io, &bus) <= capacity);
-    }
-    try testing.expect(recorder.count > 0);
+    // Every one of these has to come back. If any hangs the test times out
+    // rather than failing, which is itself the signal — an unbounded drain
+    // against this producer never returns at all.
+    //
+    // The first is exact: the ring was full going in, so a drain that stops at
+    // the bound delivers exactly that many. Whether the producer has been
+    // scheduled by now does not change it.
+    try testing.expectEqual(capacity, queue.drainInto(io, &bus));
     for (0..8) |_| {
         try testing.expect(queue.drainInto(io, &bus) <= capacity);
     }
+    try testing.expect(recorder.count >= capacity);
 }
 
 test "pushes from other threads all arrive" {
