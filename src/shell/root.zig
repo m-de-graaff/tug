@@ -19,6 +19,7 @@ pub const caps = @import("term/caps.zig");
 pub const modes = @import("term/modes.zig");
 pub const key = @import("input/key.zig");
 pub const decoder = @import("input/decoder.zig");
+pub const waiting = @import("loop/wait.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;
@@ -30,6 +31,7 @@ pub const KeyEvent = key.KeyEvent;
 pub const PasteEvent = key.PasteEvent;
 pub const InputEvent = key.InputEvent;
 pub const Decoder = decoder.Decoder;
+pub const Waker = waiting.Waker;
 
 test {
     std.testing.refAllDecls(@This());

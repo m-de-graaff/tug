@@ -95,9 +95,13 @@ pub const Impl = struct {
         return .{ .cols = window.col, .rows = window.row };
     }
 
-    pub fn setWakeHandle(self: *Impl, handle: Handle) void {
+    pub fn setWakeHandle(self: *Impl, handle_value: Handle) void {
         _ = self;
-        wake_handle.store(handle, .release);
+        wake_handle.store(handle_value, .release);
+    }
+
+    pub fn handle(self: *Impl) Handle {
+        return self.fd;
     }
 
     pub fn writer(self: *Impl, io: std.Io, buffer: []u8) std.Io.File.Writer {
