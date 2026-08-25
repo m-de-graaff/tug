@@ -1,0 +1,10 @@
+\e[1m/config\e[0m\r
+\e[2msetting              value                from\e[0m\r
+\e[2mtheme                nope                 project\e[0m\r
+\e[2mhistory.enabled      true                 default\e[0m\r
+\e[2mhistory.max_entries  1000                 default\e[0m\r
+\e[2mkeys."ctrl+@@"       newline              project\e[0m\r
+\e[2m\e[0m\r
+\e[2m.tug/config.toml:2:1: warning: no such setting ('nosuch')\e[0m\r
+\e[2m.tug/config.toml:4:1: warning: not a key chord ('ctrl+@@')\e[0m\r
+\e[2m<built-in dark>:0:0: warning: no such theme ('nope')\e[0m\r

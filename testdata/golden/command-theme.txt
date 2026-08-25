@@ -1,0 +1,4 @@
+\e[1m/theme\e[0m\r
+\e[2mtheme                where\e[0m\r
+\e[2m  dark               built-in  (live)\e[0m\r
+\e[2m  light              built-in\e[0m\r

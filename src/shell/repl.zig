@@ -819,7 +819,7 @@ const Harness = struct {
             .kitty_keyboard = true,
             .synchronized_output = false,
             .bracketed_paste = true,
-            .size = .{ .cols = 72, .rows = 200 },
+            .size = .{ .cols = 96, .rows = 200 },
         };
         self.renderer = .init(testing.allocator, caps, caps.size);
         self.editor = .init(testing.allocator);
@@ -1414,4 +1414,89 @@ test "one warning is not two" {
 
     try harness.session.warnAtStartup();
     try testing.expect(harness.painted(&.{"1 warning in your configuration"}));
+}
+
+// --- command goldens --------------------------------------------------------
+
+/// Types `line`, submits it, and returns the frame that came out.
+///
+/// One paint, at 96 columns and 200 rows, so the whole of a `/keys` table is in
+/// the tail rather than half of it in scrollback.
+///
+/// 96 rather than 80 because `/keys`'s longest row — the `shift+enter` binding
+/// with its protocol annotation — is 84 columns and wraps below that. It wraps
+/// on a real 80-column terminal too, correctly; a golden of a wrapped row is
+/// simply a worse record of what the command said.
+///
+/// 200 rows rather than a realistic height for the same reason: a golden of a
+/// scrollback stream is a golden of where the terminal happened to be, and this
+/// phase is pinning what the commands say, not where the renderer put it.
+fn commandGolden(name: []const u8, line: []const u8, setup: ?[]const u8) !void {
+    const gpa = testing.allocator;
+
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    if (setup) |source| {
+        harness.config.apply(.project, source);
+        harness.keymap = .build(&harness.config, true);
+        harness.loaded_theme.deinit(gpa);
+        harness.loaded_theme = theme_mod.resolve(
+            gpa,
+            testing.io,
+            harness.config.theme.value,
+            null,
+            harness.config.theme.source,
+        );
+    }
+
+    try harness.typeText(line);
+    try harness.press(.{ .key = .enter });
+
+    var buffer: [128 * 1024]u8 = undefined;
+    var sink: [128 * 1024]u8 = undefined;
+    var counting: Counting = .init(&buffer, &sink);
+    _ = try harness.renderer.paint(&counting.writer);
+    try counting.writer.flush();
+    // Every golden is also a one-write-per-frame assertion, for free.
+    try testing.expect(counting.writes <= 1);
+
+    return transcript.expectGolden(gpa, name, counting.bytes());
+}
+
+test "golden: /help" {
+    try commandGolden("command-help", "/help", null);
+}
+
+test "golden: /keys, with a rebind and a displaced default" {
+    // A config binding on top of a default, so the golden pins the `from`
+    // column rather than the happy path alone.
+    try commandGolden("command-keys", "/keys",
+        \\[keys]
+        \\"ctrl+j" = "newline"
+        \\"ctrl+g" = "quit"
+        \\
+    );
+}
+
+test "golden: /config, with one warning of each kind" {
+    try commandGolden("command-config", "/config",
+        \\theme = "nope"
+        \\nosuch = 1
+        \\[keys]
+        \\"ctrl+@@" = "newline"
+        \\
+    );
+}
+
+test "golden: /theme, listing what there is" {
+    try commandGolden("command-theme", "/theme", null);
+}
+
+test "golden: /quit says nothing and leaves" {
+    // The one command with no output. The golden is the echo and nothing
+    // after it, and it is worth pinning precisely because "prints nothing" is
+    // the easiest thing to break into "prints a blank row".
+    try commandGolden("command-quit", "/quit", null);
 }

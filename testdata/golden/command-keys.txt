@@ -1,0 +1,34 @@
+\e[1m/keys\e[0m\r
+\e[2mchord                action               from\e[0m\r
+\e[2msession\e[0m\r
+\e[2m  enter              submit               default\e[0m\r
+\e[2m  ctrl+c             interrupt            default\e[0m\r
+\e[2m  ctrl+d             end_of_input         default\e[0m\r
+\e[2m  ctrl+l             clear_screen         default\e[0m\r
+\e[2m  ctrl+g             quit                 project\e[0m\r
+\e[2mmovement\e[0m\r
+\e[2m  left               move_left            default\e[0m\r
+\e[2m  right              move_right           default\e[0m\r
+\e[2m  ctrl+b             move_left            default\e[0m\r
+\e[2m  ctrl+f             move_right           default\e[0m\r
+\e[2m  alt+b              move_word_left       default\e[0m\r
+\e[2m  alt+f              move_word_right      default\e[0m\r
+\e[2m  ctrl+a             move_line_start      default\e[0m\r
+\e[2m  ctrl+e             move_line_end        default\e[0m\r
+\e[2m  home               move_line_start      default\e[0m\r
+\e[2m  end                move_line_end        default\e[0m\r
+\e[2m  up                 move_up              default\e[0m\r
+\e[2m  down               move_down            default\e[0m\r
+\e[2mediting\e[0m\r
+\e[2m  shift+enter        newline              default (kitty keyboard protocol only)\e[0m\r
+\e[2m  tab                complete             default\e[0m\r
+\e[2m  backspace          delete_back          default\e[0m\r
+\e[2m  ctrl+backspace     delete_back          default\e[0m\r
+\e[2m  delete             delete_forward       default\e[0m\r
+\e[2m  ctrl+w             kill_word_back       default\e[0m\r
+\e[2m  ctrl+u             kill_to_line_start   default\e[0m\r
+\e[2m  ctrl+k             kill_to_line_end     default\e[0m\r
+\e[2m  ctrl+y             yank                 default\e[0m\r
+\e[2m  ctrl+j             newline              project\e[0m\r
+\e[2munbound\e[0m\r
+\e[2m  history_prev, history_next\e[0m\r
