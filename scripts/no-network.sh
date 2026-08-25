@@ -13,7 +13,11 @@
 set -eu
 
 root=${1:-src}
-pattern='std\.http|std\.net|std\.posix\.socket|std\.crypto\.tls'
+# std.Io.net is where sockets actually live in Zig 0.16 — std.net and
+# std.posix.socket, which the v0.1 gate greps for, no longer exist. Both stay in
+# the pattern anyway: they cost nothing and they catch a copied-in snippet
+# written against an older std before the compiler does.
+pattern='std\.http|std\.Io\.net|std\.net|std\.posix\.socket|std\.crypto\.tls'
 allowed='^src/providers/transport'
 
 hits=$(grep -rnE "$pattern" "$root" | grep -vE "$allowed" || true)

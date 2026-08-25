@@ -13,6 +13,16 @@ Definition of Done recorded that the gate was never legitimately silenced. The
 gate even said what would end it, in its own comment: *"If this is v0.2 provider
 work, delete this gate in the commit that adds it."*
 
+A note on that pattern list, found while writing this record: in Zig 0.16 there
+is no `std.net` and no `std.posix.socket`. Sockets live under `std.Io.net`,
+reached through an injected `Io` implementation. Two of the four patterns the
+v0.1 gate watched for had nothing to match, which is part of why it never fired —
+a gate can be green because the code is clean or because it is looking in the
+wrong place, and those are indistinguishable until someone checks. `std.Io.net`
+joins the list here. The two dead patterns stay: they cost nothing, and they
+catch a snippet copied in from older-std documentation one step before the
+compiler does.
+
 v0.2 is that work. All four patterns are about to be legitimate — and the
 instruction the v0.1 author left behind turns out to be the wrong one. A gate
 that dies on the first commit that needs it protected nothing at the moment it

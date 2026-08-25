@@ -62,7 +62,10 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-      - run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+      # Inside a network namespace with no interfaces: a test that opens a socket
+      # fails here rather than flaking, which is what makes "CI never touches a
+      # network" a fact instead of a promise (DR-016).
+      - run: sh scripts/offline.sh zig build test -Doptimize=${{ matrix.optimize }} --summary all
 
   wasm:
     name: tugcore is freestanding
