@@ -17,15 +17,13 @@ const panic_handler = @import("panic.zig");
 
 pub const panic = panic_handler.handler;
 
-/// This program does no networking — in v0.1 by design and afterwards by
-/// architecture, since network code lives behind the provider interface and
-/// there is no provider yet. Declaring it keeps the socket, DNS and TLS code
-/// out of the binary rather than trusting dead code elimination to find all of
-/// it.
-pub const std_options: std.Options = .{
-    .networking = false,
-    .http_disable_tls = true,
-};
+/// Networking is on from v0.2, and confined rather than absent: the only code
+/// that may open a socket lives under `src/providers/transport` (`DR-016`), it
+/// is reached only through the three-function seam of `DR-017`, and nothing
+/// constructs a client before the first request. TLS is 1.3-only, which is what
+/// the standard library's TLS offers and what every endpoint tug talks to
+/// serves; `DR-023` is where the evidence for keeping it is written down.
+pub const std_options: std.Options = .{};
 
 /// Caps the total length of the command line tug will parse. Arguments arrive
 /// on Windows as one string that must be split into an owned slice, so this

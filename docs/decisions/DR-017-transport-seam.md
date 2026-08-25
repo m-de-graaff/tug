@@ -93,10 +93,20 @@ version's CI can claim what it claims.
 
 ## Proxies
 
-`std.http.Client.initDefaultProxies` reads `http_proxy` / `https_proxy` from an
-environment map and is wired through as std passthrough — tug forms no opinion,
-adds no configuration, and does not attempt to improve on it. `.artifacts/v0.2.md`
-asked for exactly this, or a documented deferral, and no heroics either way.
+**Deferred, with the reason.** `std.http.Client.initDefaultProxies` exists in
+Zig 0.16.0 and reads `http_proxy` / `https_proxy`, but its signature is
+`(client, arena, *const std.process.Environ.Map)` and the `Proxy` values it
+allocates must outlive the client. The transport owns no arena — it takes an
+allocator and returns every byte it takes, which is what lets
+`std.testing.allocator` fail a test over a leaked byte. Wiring proxies means
+either giving this type an arena whose lifetime is the process, or leaking on
+purpose and documenting it.
+
+Neither is worth doing for a feature no user has asked for in this version.
+`.artifacts/v0.2.md` asked for the passthrough *or* a documented deferral, one
+line either way and no heroics, and this is the deferral. The trigger to revisit
+is a real proxy deployment with a real requirement; the fix at that point is an
+arena on the frontend, passed in through `Options`, and roughly ten lines.
 
 One limitation is documented rather than solved: **the plaintext policy does not
 see through a proxy.** tug refuses `http://` to a non-loopback host, but an

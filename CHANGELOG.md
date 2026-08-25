@@ -28,6 +28,26 @@ older std, but a green gate had been proving less than it appeared to.
 
 ### Added
 
+**The provider layer can open a socket.** `std.http.Client` over the standard
+library's TLS 1.3, confined to `src/providers/transport` by `DR-016` and reached
+only through the three-function seam of `DR-017`. Four policies ride with it, and
+each is a refusal: no redirects — an API does not redirect, and following one
+would send a key to whoever asked; no plaintext to a non-loopback host without an
+explicit per-endpoint `insecure = true`; no compressed response encodings, which
+would arrive correctly framed and in the wrong shape; and nothing constructed at
+all before the first request, so the 10 ms prompt budget survives a configured
+provider.
+
+`--debug-wire` dumps a request with every header value redacted except a short
+allow-list. Inverted from the usual arrangement on purpose: an auth header added
+in some later version is redacted the day it is added rather than the day someone
+remembers.
+
+**A fixture transport** (`src/providers/fixture.zig`) replays a recorded response
+through the same seam, at any chunk size, including the one-byte-at-a-time sizes
+no real network produces. It lives outside the confinement grep's allowance, so
+the gate proves mechanically that the offline path has no network in it.
+
 **An incremental SSE parser** (`tugproviders`), v0.2's untrusted input decoder,
 built like the terminal's: caller-owned buffers, `feed` then `next`, partial
 input is not an error, nothing grows, and a returned event borrows until the next
