@@ -468,7 +468,6 @@ pub const Session = struct {
             },
             .keys => try self.keymap.write(out),
             .theme => try self.switchTheme(out, rest),
-            .demo => try out.writeAll("demo\n"),
         }
 
         try block.finish();

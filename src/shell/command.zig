@@ -22,7 +22,7 @@ const core = @import("tugcore");
 
 /// Every command v0.1 has. The tag name is the word after the slash, which is
 /// why there is no `name` field to drift from it.
-pub const Id = enum { help, quit, config, theme, keys, demo };
+pub const Id = enum { help, quit, config, theme, keys };
 
 pub const Command = struct {
     id: Id,
@@ -42,7 +42,6 @@ pub const table: []const Command = &.{
     .{ .id = .config, .summary = "the resolved settings, and where each came from" },
     .{ .id = .theme, .args = "[name]", .summary = "list the themes, or switch to one" },
     .{ .id = .keys, .summary = "the live key bindings" },
-    .{ .id = .demo, .summary = "the probe from Phase 10; removed in the next commit" },
 };
 
 comptime {

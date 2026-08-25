@@ -5,4 +5,3 @@
 \e[2m  /config            the resolved settings, and where each came from\e[0m\r
 \e[2m  /theme [name]      list the themes, or switch to one\e[0m\r
 \e[2m  /keys              the live key bindings\e[0m\r
-\e[2m  /demo              the probe from Phase 10; removed in the next commit\e[0m\r
