@@ -211,6 +211,20 @@ jobs:
       - run: zig build
       - run: sh scripts/command-session.sh zig-out/bin/tug
 
+  soak-session:
+    name: a thousand interactions, leak-free
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The roadmap's leak criterion, verbatim. Debug, because that is the build
+      # whose allocator counts; tmux, because the mix includes resizes and only
+      # something outside the process can deliver one.
+      - run: zig build -Doptimize=Debug
+      - run: sh scripts/soak-session.sh zig-out/bin/tug
+
   # --- the meta-gate ------------------------------------------------------
 
   wall-clock:
@@ -231,6 +245,7 @@ jobs:
         editor-session,
         theme-session,
         command-session,
+        soak-session,
       ]
     if: always()
     steps:

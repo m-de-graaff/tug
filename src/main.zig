@@ -92,6 +92,28 @@ const Options = struct {
     theme: ?[]const u8 = null,
 };
 
+/// A shell may run for hours, so a release build gets `smp_allocator` and pays
+/// nothing for bookkeeping it will never read. A Debug build gets the
+/// bookkeeping, because the roadmap's leak gate is a 1,000-interaction session
+/// under exactly this allocator, and a gate needs a nonzero exit to fail on.
+const leak_checking = builtin.mode == .Debug;
+
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+
+fn sessionAllocator() std.mem.Allocator {
+    return if (leak_checking) debug_allocator.allocator() else std.heap.smp_allocator;
+}
+
+/// Nonzero when the session leaked. Called once, on the way out of `main`, and
+/// only after everything the session owns has been released.
+fn reportLeaks() u8 {
+    if (!leak_checking) return 0;
+    return switch (debug_allocator.deinit()) {
+        .leak => 1,
+        .ok => 0,
+    };
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var threaded: std.Io.Threaded = .init_single_threaded;
     const io = threaded.io();
@@ -184,13 +206,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 environment.config,
                 builtin.os.tag == .windows,
             );
-            return shell.repl.run(
-                // The shell is the first thing in tug that lives longer than a
-                // turn, and the editor, the history and the renderer all
-                // allocate. A general-purpose allocator is what a process that
-                // may run for hours wants; Phase 11's DebugAllocator gate over a
-                // 1,000-interaction session is what will police it.
-                std.heap.smp_allocator,
+            // The shell is the first thing in tug that lives longer than a turn,
+            // and the editor, the history and the renderer all allocate. Which
+            // allocator answers depends on the build — see `sessionAllocator`.
+            try shell.repl.run(
+                sessionAllocator(),
                 io,
                 stdout,
                 .{
@@ -208,6 +228,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     },
                 },
             );
+
+            // After the session, and only on the path where it ended normally:
+            // a session that failed has an exit code already, and a leak
+            // reported over a failure would name the failure's own allocations.
+            if (reportLeaks() != 0) {
+                var stderr_buffer: [128]u8 = undefined;
+                var stderr_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+                stderr_file.interface.writeAll("tug: the session leaked memory\n") catch {};
+                stderr_file.interface.flush() catch {};
+                std.process.exit(1);
+            }
         },
     }
 }
@@ -843,6 +874,16 @@ test "--theme composes with --debug-config, in either order" {
     const before = parseArgs(&.{ "tug", "--theme", "light", "--debug-config" });
     try testing.expectEqual(Command.debug_config, before.command);
     try testing.expectEqualStrings("light", before.theme.?);
+}
+
+test "a Debug build checks itself for leaks and a release build does not" {
+    // The gate is the exit code, so what is asserted here is that the two
+    // builds disagree in the right direction: Debug has something to report,
+    // release has nothing to report and pays nothing to not report it. Calling
+    // reportLeaks here is safe precisely because nothing has allocated through
+    // that instance — the tests use `std.testing.allocator`.
+    try testing.expectEqual(builtin.mode == .Debug, leak_checking);
+    try testing.expectEqual(@as(u8, 0), reportLeaks());
 }
 
 test "--debug-first-paint is its own command" {
