@@ -93,6 +93,12 @@ pub fn build(b: *std.Build) void {
     providers.addAnonymousImport("framing-corners.sse", .{
         .root_source_file = b.path("testdata/fixtures/anthropic/framing-corners.sse"),
     });
+    providers.addAnonymousImport("clean-turn.head", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/clean-turn.head"),
+    });
+    providers.addAnonymousImport("clean-turn.sse", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/clean-turn.sse"),
+    });
 
     const shell = b.addModule("tugshell", .{
         .root_source_file = b.path("src/shell/root.zig"),

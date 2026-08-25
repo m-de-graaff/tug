@@ -12,6 +12,7 @@
 const std = @import("std");
 
 pub const canary = @import("canary.zig");
+pub const fixture = @import("fixture.zig");
 pub const sse = @import("sse.zig");
 pub const transport = @import("transport.zig");
 
