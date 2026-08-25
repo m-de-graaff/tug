@@ -167,6 +167,21 @@ jobs:
       - run: zig build
       - run: sh scripts/theme-session.sh zig-out/bin/tug
 
+  command-session:
+    name: commands reach the terminal
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The five goldens pin what each command prints and the unit tests pin the
+      # router's decisions. Neither can say whether a slash typed into a running
+      # shell reaches a handler, because only `repl.run` wires them together and
+      # only a pty runs it.
+      - run: zig build
+      - run: sh scripts/command-session.sh zig-out/bin/tug
+
   # --- the meta-gate ------------------------------------------------------
 
   wall-clock:
@@ -184,6 +199,7 @@ jobs:
         mock-modes,
         editor-session,
         theme-session,
+        command-session,
       ]
     if: always()
     steps:
