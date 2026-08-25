@@ -235,13 +235,24 @@ pub fn build(b: *std.Build) void {
     // terminate, which is not a shape a five-minute CI wall can hold. What CI
     // gets is the seed corpus, replayed on every ordinary `zig build test`; the
     // roadmap puts the real fuzzing job in v0.2.
-    const fuzz_step = b.step("fuzz", "Build the decoder fuzz target (add -- --fuzz to run it)");
-    const fuzz_tests = b.addTest(.{
-        .name = "tugshell-fuzz",
-        .root_module = shell,
-        .filters = &.{"fuzz:"},
-    });
-    fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
+    const fuzz_step = b.step("fuzz", "Build the fuzz targets (add -- --fuzz to run them)");
+
+    // Every module that decodes bytes from outside the process. Two of them now:
+    // the terminal's input decoder and the provider layer's SSE parser, which is
+    // v0.2's equivalent and hardened the same way.
+    const fuzz_targets = [_]struct { name: []const u8, module: *std.Build.Module }{
+        .{ .name = "tugshell-fuzz", .module = shell },
+        .{ .name = "tugproviders-fuzz", .module = providers },
+    };
+
+    for (fuzz_targets) |entry| {
+        const fuzz_tests = b.addTest(.{
+            .name = entry.name,
+            .root_module = entry.module,
+            .filters = &.{"fuzz:"},
+        });
+        fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
+    }
 
     // --- size --------------------------------------------------------------
 

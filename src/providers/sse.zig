@@ -596,6 +596,125 @@ test "the corners fixture decodes to what it claims" {
     try testing.expectEqualStrings("42", events.items[1].id);
 }
 
+// --- the two properties that make the corners above worth having ------------
+
+/// The invariant every arm of the parser has to hold: arbitrary bytes in, no
+/// crash, no hang, and never more events than the input could possibly frame.
+///
+/// `@setRuntimeSafety(true)` is on the parser's own scopes, so a bounds or cast
+/// error in `ReleaseSmall` is a trap the fuzzer sees rather than undefined
+/// behaviour it does not.
+fn parseOne(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [512]u8 = undefined;
+    const len = smith.slice(&input);
+
+    var scratch: [1024]u8 = undefined;
+    var data: [1024]u8 = undefined;
+    var parser: Parser = .init(&scratch, &data);
+
+    // Overflow is a legitimate outcome of arbitrary bytes, not a crash.
+    parser.feed(input[0..len]) catch return;
+
+    var emitted: usize = 0;
+    while (parser.next()) |_| {
+        emitted += 1;
+        // An event costs at least the two bytes of a blank line, so the parser
+        // cannot emit more events than it was given bytes. A violation means the
+        // dispatch loop stopped consuming — which is the hang this bound catches
+        // before it becomes one.
+        try testing.expect(emitted <= len);
+    }
+}
+
+test "fuzz: the SSE parser survives arbitrary bytes" {
+    // Outside fuzz mode the runner replays this corpus once, so the target costs
+    // microseconds on an ordinary `zig build test` — the PR-pipeline smoke, at
+    // no wall-clock cost. `zig build fuzz -- --fuzz` is the real session, and
+    // the nightly runs it for fifteen minutes.
+    try std.testing.fuzz({}, parseOne, .{
+        .corpus = &.{
+            // Seeds from what an SSE stream actually looks like, so a session
+            // starts from shapes that mean something rather than from noise.
+            "data: hello\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"text_delta\"}\n\n",
+            ": keepalive\n\n",
+            "data: [DONE]\n\n",
+            "data: a\rdata: b\r\n\r\n",
+            "\xEF\xBB\xBFdata: bom\n\n",
+            "retry: 99999999999999999999\n\n",
+            "data", // a field name and nothing else
+            "data:", // a field with an empty value
+            "\r", // the held-back terminator
+            "\n\n\n\n", // dispatches that dispatch nothing
+            "id: \x00\x01\x02\ndata: control bytes\n\n",
+            "event: " ++ "x" ** 300 ++ "\ndata: overlong name\n\n",
+        },
+    });
+}
+
+/// Feeds one input at random split points and collects what came out.
+fn collectSplit(
+    input: []const u8,
+    random: std.Random,
+    into: *std.ArrayList(ServerEvent),
+) !void {
+    var scratch: [8192]u8 = undefined;
+    var data: [8192]u8 = undefined;
+    var parser: Parser = .init(&scratch, &data);
+
+    var offset: usize = 0;
+    while (offset < input.len) {
+        const take = @min(input.len - offset, random.uintLessThan(usize, 5) + 1);
+        try parser.feed(input[offset..][0..take]);
+        offset += take;
+
+        while (parser.next()) |event| try into.append(testing.allocator, .{
+            .event = try testing.allocator.dupe(u8, event.event),
+            .data = try testing.allocator.dupe(u8, event.data),
+            .id = try testing.allocator.dupe(u8, event.id),
+            .retry = event.retry,
+        });
+    }
+}
+
+test "chunking cannot change what the parser sees" {
+    const corpus = [_][]const u8{
+        "data: hello\n\n",
+        "event: a\nid: 1\ndata: one\ndata: two\n\ndata: three\n\n",
+        ": keepalive\r\ndata: crlf\r\n\r\n",
+        "\xEF\xBB\xBFdata: \xE4\xB8\xAD\xE6\x96\x87 and more\n\n",
+        "data\ndata: after\n\n",
+        @embedFile("framing-corners.sse"),
+    };
+
+    var prng: std.Random.DefaultPrng = .init(0x5e5e_5e5e);
+    const random = prng.random();
+
+    for (corpus) |input| {
+        var whole: std.ArrayList(ServerEvent) = .empty;
+        defer freeAll(&whole);
+        try collect(input, &whole);
+
+        // Twenty random splittings per input. A split lands anywhere, including
+        // between a CR and its LF and inside a multi-byte codepoint — the two
+        // places a parser that peeks at the next byte gets it wrong.
+        for (0..20) |_| {
+            var split: std.ArrayList(ServerEvent) = .empty;
+            defer freeAll(&split);
+
+            try collectSplit(input, random, &split);
+
+            try testing.expectEqual(whole.items.len, split.items.len);
+            for (whole.items, split.items) |a, b| {
+                try testing.expectEqualStrings(a.event, b.event);
+                try testing.expectEqualStrings(a.data, b.data);
+                try testing.expectEqualStrings(a.id, b.id);
+                try testing.expectEqual(a.retry, b.retry);
+            }
+        }
+    }
+}
+
 test "a long stream reuses the front of the buffer" {
     var scratch: [64]u8 = undefined;
     var data: [64]u8 = undefined;
