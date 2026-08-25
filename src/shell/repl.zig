@@ -7,9 +7,10 @@
 //! machinery that has no idea an editor exists.
 //!
 //! It also contains **no `KeyEvent` comparisons**. Every key becomes an
-//! `Action` in `actions.zig` and this file switches on the name. That is the
-//! indirection Phase 8 rebinds, and the mechanical check is a grep: `key.eql`
-//! and `mods.ctrl` appear nowhere below.
+//! `Action` — by way of the `Keymap` the session was handed, which `input/
+//! keymap.zig` resolved from the default table and the user's config — and this
+//! file switches on the name. That is the indirection Phase 8 rebinds, and the
+//! mechanical check is a grep: `key.eql` and `mods.ctrl` appear nowhere below.
 //!
 //! **The turn.** One provider thread per submission, joined at `turn_end`,
 //! rather than one per process. `stop` is set before every join so a thread
@@ -35,6 +36,7 @@ const decoder_mod = @import("input/decoder.zig");
 const editor_mod = @import("edit/editor.zig");
 const history_mod = @import("edit/history.zig");
 const key_mod = @import("input/key.zig");
+const keymap_mod = @import("input/keymap.zig");
 const loop_mod = @import("loop/loop.zig");
 const modes = @import("term/modes.zig");
 const probe_mod = @import("term/probe.zig");
@@ -69,8 +71,10 @@ pub const Session = struct {
     waker: *waiting.Waker,
     bus: *core.Bus,
 
-    /// Decides which chord means `newline` (`DR-003`).
-    kitty: bool,
+    /// Decides what every chord means, including which one is `newline`
+    /// (`DR-003`). Resolved from the default table and every config layer;
+    /// borrowed from `run`'s frame, or from a test's.
+    keymap: *const keymap_mod.Keymap,
     provider: ?Provider,
 
     state: State = .idle,
@@ -174,7 +178,7 @@ pub const Session = struct {
     }
 
     fn applyKey(self: *Session, event: KeyEvent) !void {
-        const action = actions.defaultAction(event, self.kitty) orelse {
+        const action = self.keymap.lookup(event) orelse {
             try self.typeLiteral(event);
             return;
         };
@@ -465,6 +469,17 @@ pub fn run(
     var decoder: decoder_mod.Decoder = .init(&scratch);
     decoder.setKittyActive(detected.kitty_keyboard);
 
+    // After the probe, because which chord means `newline` depends on its
+    // answer, and after the config load, because that is where the rebinds come
+    // from. The frame owns it; the session borrows it for the life of the loop.
+    //
+    // Its warnings are not printed. There is nowhere to put them until Phase
+    // 10's `/config` renders a notice block, and a shell that opens with four
+    // lines of scrollback about a keymap would be worse than one that is
+    // quietly using the defaults. `--debug-config` is where they are visible
+    // today.
+    var keymap: keymap_mod.Keymap = .build(&loaded.config, detected.kitty_keyboard);
+
     // Anything typed while the terminal was deciding whether to answer. On a
     // terminal that answers neither query the probe window is the full 50 ms,
     // and dropping what arrived in it means dropping the first keystroke of
@@ -489,7 +504,7 @@ pub fn run(
         .queue = &queue,
         .waker = &waker,
         .bus = &bus,
-        .kitty = detected.kitty_keyboard,
+        .keymap = &keymap,
         .provider = setup.provider,
     };
     try bus.subscribe(.{ .context = &session, .handler = Session.onEvent });
@@ -533,6 +548,9 @@ const Harness = struct {
     renderer: Renderer,
     editor: Editor,
     history: History,
+    /// A value rather than a local, so a test can rebind it after `init` and
+    /// the session — which holds a pointer to this field — sees the change.
+    keymap: keymap_mod.Keymap = undefined,
     bus: core.Bus = .{},
     session: Session = undefined,
 
@@ -547,6 +565,7 @@ const Harness = struct {
         self.renderer = .init(testing.allocator, caps, caps.size);
         self.editor = .init(testing.allocator);
         self.history = .init(testing.allocator, undefined, null);
+        self.keymap = .defaults(true);
         self.bus = .{};
         self.session = .{
             .io = undefined,
@@ -558,7 +577,7 @@ const Harness = struct {
             .queue = undefined,
             .waker = undefined,
             .bus = &self.bus,
-            .kitty = true,
+            .keymap = &self.keymap,
             .provider = null,
         };
     }
@@ -796,6 +815,42 @@ test "the quit action leaves, whatever is in the draft" {
 
     try harness.typeText("mid sentence");
     try harness.session.applyAction(.quit);
+    try testing.expect(harness.session.quitting);
+}
+
+test "the session dispatches through the keymap it was given, not through a table" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    // Rebind `ctrl+j` to newline, the way a project config would.
+    var config: core.config.Config = .{};
+    config.apply(.project, "[keys]\n\"ctrl+j\" = \"newline\"\n");
+    harness.keymap = .build(&config, true);
+
+    try harness.typeText("one");
+    try harness.press(.{ .key = .{ .char = 'j' }, .mods = .{ .ctrl = true } });
+    try harness.typeText("two");
+    try testing.expectEqualStrings("one\ntwo", harness.editor.items());
+    try testing.expectEqual(@as(usize, 0), harness.history.count());
+}
+
+test "a rebound chord stops meaning what it used to" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    var config: core.config.Config = .{};
+    config.apply(.project, "[keys]\n\"ctrl+y\" = \"quit\"\n");
+    harness.keymap = .build(&config, true);
+
+    try harness.typeText("alpha beta");
+    try harness.press(.{ .key = .{ .char = 'w' }, .mods = .{ .ctrl = true } });
+    try testing.expectEqualStrings("alpha ", harness.editor.items());
+
+    // ctrl+y was yank. It is not any more.
+    try harness.press(.{ .key = .{ .char = 'y' }, .mods = .{ .ctrl = true } });
+    try testing.expectEqualStrings("alpha ", harness.editor.items());
     try testing.expect(harness.session.quitting);
 }
 

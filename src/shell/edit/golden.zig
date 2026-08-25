@@ -20,6 +20,7 @@ const testing = std.testing;
 const actions = @import("actions.zig");
 const editor_mod = @import("editor.zig");
 const key_mod = @import("../input/key.zig");
+const keymap_mod = @import("../input/keymap.zig");
 const renderer_mod = @import("../render/renderer.zig");
 const transcript = @import("../render/transcript.zig");
 const Counting = @import("../render/counting_writer.zig").Counting;
@@ -37,7 +38,8 @@ const plain_caps: renderer_mod.Capabilities = .{
 };
 
 const Step = union(enum) {
-    /// One chord, through `defaultAction` like every real keypress.
+    /// One chord, resolved through a default `Keymap` like every real
+    /// keypress. No config layer: these transcripts are about the renderer.
     key: KeyEvent,
     /// Typed literally, one character key per byte.
     text: []const u8,
@@ -65,9 +67,14 @@ fn golden(name: []const u8, caps: renderer_mod.Capabilities, script: []const Ste
     var editor: Editor = .init(gpa);
     defer editor.deinit();
 
+    // The defaults, with no config over them. That every one of these
+    // transcripts still matches byte for byte is also the check that the
+    // resolver's seed is the table `defaultAction` used to scan.
+    const keymap: keymap_mod.Keymap = .defaults(caps.kitty_keyboard);
+
     for (script) |step| switch (step) {
         .key => |event| {
-            const action = actions.defaultAction(event, caps.kitty_keyboard) orelse continue;
+            const action = keymap.lookup(event) orelse continue;
             _ = try actions.applyEdit(&editor, action);
         },
         .text => |bytes| for (bytes) |byte| {

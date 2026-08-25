@@ -1,11 +1,11 @@
-//! Named actions, and the one table that turns a chord into one.
+//! Named actions, and the default table a chord is resolved against.
 //!
-//! This file is the seam Phase 8 rebinds. Nothing above it may look at a
-//! `KeyEvent` and decide what to do: the session asks `defaultAction` for a
-//! name and then dispatches on the name. The mechanical check is that
-//! `repl.zig` contains no `key.eql` and no `.mods.ctrl` — if it does, the
-//! indirection is decorative and vi mode will cost a rewrite instead of a
-//! table.
+//! This file is the seam Phase 8 rebound. Nothing above it may look at a
+//! `KeyEvent` and decide what to do: `input/keymap.zig` resolves this table and
+//! every config layer into one live `Keymap`, the session asks that for a name,
+//! and then dispatches on the name. The mechanical check is that `repl.zig`
+//! contains no `key.eql` and no `.mods.ctrl` — if it does, the indirection is
+//! decorative and vi mode will cost a rewrite instead of a table.
 //!
 //! Two actions carry a fallback rather than a fixed chord, and `DR-003` is why:
 //! `shift+enter` does not exist in the legacy terminal encoding, so `newline`
@@ -67,10 +67,9 @@ pub const Binding = struct {
     when: Availability = .always,
 };
 
-/// The default keymap. Phase 8 layers a TOML keymap over this and `/keys`
-/// renders it; until then it is the whole of the mapping, and it is a table
-/// rather than a switch precisely so those two can consume it without it
-/// having to be rewritten first.
+/// The default keymap — the seed `keymap.Keymap.defaults` reads and a config
+/// file layers over. A table rather than a switch precisely so that resolver
+/// and `/keys` can both consume it without it having to be rewritten first.
 pub const bindings: []const Binding = &.{
     .{ .chord = .{ .key = .enter }, .action = .submit },
     .{ .chord = .{ .key = .enter, .mods = .{ .shift = true } }, .action = .newline, .when = .kitty },
@@ -101,23 +100,6 @@ pub const bindings: []const Binding = &.{
     .{ .chord = .{ .key = .{ .char = 'k' }, .mods = .{ .ctrl = true } }, .action = .kill_to_line_end },
     .{ .chord = .{ .key = .{ .char = 'y' }, .mods = .{ .ctrl = true } }, .action = .yank },
 };
-
-/// The action a chord means, or null when it means nothing.
-///
-/// Null is not a failure: an unbound chord in a text editor is a keypress to
-/// ignore, and the alternative — guessing — is how a stray function key ends up
-/// deleting a line.
-pub fn defaultAction(event: KeyEvent, kitty: bool) ?Action {
-    for (bindings) |binding| {
-        const live = switch (binding.when) {
-            .always => true,
-            .kitty => kitty,
-            .legacy => !kitty,
-        };
-        if (live and binding.chord.eql(event)) return binding.action;
-    }
-    return null;
-}
 
 /// What `applyEdit` could not do on its own.
 ///
@@ -257,51 +239,6 @@ pub fn category(action: Action) Category {
 
 const testing = std.testing;
 
-test "enter submits and the newline chord depends on the protocol" {
-    const enter: KeyEvent = .{ .key = .enter };
-    try testing.expectEqual(Action.submit, defaultAction(enter, true).?);
-    try testing.expectEqual(Action.submit, defaultAction(enter, false).?);
-
-    const shift_enter: KeyEvent = .{ .key = .enter, .mods = .{ .shift = true } };
-    const alt_enter: KeyEvent = .{ .key = .enter, .mods = .{ .alt = true } };
-
-    // With the protocol, shift+enter is a newline and alt+enter is nothing.
-    try testing.expectEqual(Action.newline, defaultAction(shift_enter, true).?);
-    try testing.expectEqual(@as(?Action, null), defaultAction(alt_enter, true));
-
-    // Without it, the fallback is live and shift+enter cannot arrive at all.
-    try testing.expectEqual(Action.newline, defaultAction(alt_enter, false).?);
-    try testing.expectEqual(@as(?Action, null), defaultAction(shift_enter, false));
-}
-
-test "the emacs set is bound exactly as the spec lists it" {
-    const cases = [_]struct { event: KeyEvent, action: Action }{
-        .{ .event = .{ .key = .{ .char = 'a' }, .mods = .{ .ctrl = true } }, .action = .move_line_start },
-        .{ .event = .{ .key = .{ .char = 'e' }, .mods = .{ .ctrl = true } }, .action = .move_line_end },
-        .{ .event = .{ .key = .home }, .action = .move_line_start },
-        .{ .event = .{ .key = .end }, .action = .move_line_end },
-        .{ .event = .{ .key = .{ .char = 'b' }, .mods = .{ .alt = true } }, .action = .move_word_left },
-        .{ .event = .{ .key = .{ .char = 'f' }, .mods = .{ .alt = true } }, .action = .move_word_right },
-        .{ .event = .{ .key = .{ .char = 'w' }, .mods = .{ .ctrl = true } }, .action = .kill_word_back },
-        .{ .event = .{ .key = .{ .char = 'u' }, .mods = .{ .ctrl = true } }, .action = .kill_to_line_start },
-        .{ .event = .{ .key = .{ .char = 'k' }, .mods = .{ .ctrl = true } }, .action = .kill_to_line_end },
-        .{ .event = .{ .key = .{ .char = 'y' }, .mods = .{ .ctrl = true } }, .action = .yank },
-        .{ .event = .{ .key = .{ .char = 'l' }, .mods = .{ .ctrl = true } }, .action = .clear_screen },
-        .{ .event = .{ .key = .{ .char = 'c' }, .mods = .{ .ctrl = true } }, .action = .interrupt },
-        .{ .event = .{ .key = .{ .char = 'd' }, .mods = .{ .ctrl = true } }, .action = .end_of_input },
-        .{ .event = .{ .key = .up }, .action = .move_up },
-        .{ .event = .{ .key = .down }, .action = .move_down },
-        .{ .event = .{ .key = .left }, .action = .move_left },
-        .{ .event = .{ .key = .right }, .action = .move_right },
-        .{ .event = .{ .key = .backspace }, .action = .delete_back },
-        .{ .event = .{ .key = .delete }, .action = .delete_forward },
-    };
-    for (cases) |case| {
-        try testing.expectEqual(case.action, defaultAction(case.event, true).?);
-        try testing.expectEqual(case.action, defaultAction(case.event, false).?);
-    }
-}
-
 test "an unbound chord types its character only when it carries no command modifier" {
     try testing.expectEqual(@as(?u21, 'a'), literalCodepoint(.{ .key = .{ .char = 'a' } }));
     // Shift is how a capital is typed, so it is not a command modifier.
@@ -326,28 +263,17 @@ test "an unbound chord types its character only when it carries no command modif
     try testing.expectEqual(@as(?u21, null), literalCodepoint(.{ .key = .{ .f = 5 } }));
 }
 
-test "an unbound chord is null rather than a guess" {
-    try testing.expectEqual(
-        @as(?Action, null),
-        defaultAction(.{ .key = .{ .f = 5 } }, true),
-    );
-    try testing.expectEqual(
-        @as(?Action, null),
-        defaultAction(.{ .key = .{ .char = 'q' }, .mods = .{ .super = true } }, true),
-    );
-}
-
-test "every action has a help string and every binding names a real action" {
+test "every action has a help string" {
+    // A help string that is empty is a line of `/keys` that says nothing, which
+    // costs a row of the screen to communicate less than blank space would.
+    //
+    // The table's own self-consistency — every chord resolving back to its own
+    // action under the availability it claims — moved to `input/keymap.zig`
+    // when `defaultAction` was deleted, because the resolved keymap is what
+    // dispatch actually asks.
     inline for (@typeInfo(Action).@"enum".fields) |field| {
         const action: Action = @enumFromInt(field.value);
         try testing.expect(help(action).len > 0);
-    }
-    // Every chord in the table decodes back to its own action under the
-    // availability it claims, which is what stops a typo from silently
-    // shadowing an earlier row.
-    for (bindings) |binding| {
-        const kitty = binding.when != .legacy;
-        try testing.expectEqual(binding.action, defaultAction(binding.chord, kitty).?);
     }
 }
 
