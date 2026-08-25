@@ -1,0 +1,18 @@
+endpoint = "https://api.anthropic.com/v1/messages"
+model = "claude-sonnet-4-5"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; body written by hand, response side only"
+note = """
+The happy path in the shape the Messages API streams it: message_start with the
+usage the request already cost, a content block opened, three text deltas, a
+ping between two of them, the block closed, message_delta carrying the stop
+reason and the output tokens, message_stop.
+
+Written by hand rather than recorded, so it proves the parser handles the shape
+and proves nothing about what the API currently sends. Phase 9 replaces the body
+with a real capture and this line with a date.
+
+The ping carries a data field, which is what the API actually sends — it
+dispatches like any other event and the Phase 4 mapper swallows it by name.
+"""

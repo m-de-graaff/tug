@@ -37,6 +37,7 @@ pub const repl = @import("repl.zig");
 pub const command = @import("command.zig");
 pub const cadence = @import("provider/cadence.zig");
 pub const runner = @import("provider/runner.zig");
+pub const dev = @import("dev.zig");
 
 pub const Backend = backend.Backend;
 pub const Size = backend.Size;

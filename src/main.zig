@@ -70,9 +70,22 @@ const usage =
     \\  --debug-first-paint
     \\                     Paint one frame, report the microseconds it took, exit.
     \\
+    \\development (debug builds only):
+    \\  dev sse-dump       Decode server-sent events from stdin onto stdout.
+    \\
 ;
 
-const Command = enum { help, version, caps, debug_keys, debug_config, debug_first_paint, mock, shell };
+const Command = enum {
+    help,
+    version,
+    caps,
+    debug_keys,
+    debug_config,
+    debug_first_paint,
+    dev_sse_dump,
+    mock,
+    shell,
+};
 
 /// Which provider answers a turn. An enum rather than a bool because v0.2 adds
 /// two more and this is where they will land.
@@ -156,6 +169,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return stdout.flush();
         },
         .debug_keys => return debugKeys(io, stdout, init.environ, environment_allocator.allocator()),
+        .dev_sse_dump => {
+            // Debug builds only. A release binary that carries its own debugging
+            // subcommands carries their attack surface too, and this one reads
+            // untrusted bytes from a pipe.
+            if (builtin.mode != .Debug) {
+                try stdout.writeAll("tug: dev subcommands are debug builds only\n");
+                try stdout.flush();
+                return error.DevBuildOnly;
+            }
+            const code = try shell.dev.sseDump(io, stdout);
+            if (code != 0) std.process.exit(code);
+            return;
+        },
         .debug_config => {
             try printConfig(
                 io,
@@ -267,6 +293,15 @@ fn parseArgs(argv: []const [:0]const u8) Options {
         if (eqlAny(arg, &.{"--caps"})) return .{ .command = .caps };
         if (eqlAny(arg, &.{"--debug-keys"})) return .{ .command = .debug_keys };
         if (eqlAny(arg, &.{"--debug-first-paint"})) return .{ .command = .debug_first_paint };
+        // The only two-word subcommand tug has. A literal comparison rather than
+        // a table, because a dispatch table for one entry is the abstraction
+        // this codebase does not build; the second `dev` verb is when it earns
+        // one.
+        if (eqlAny(arg, &.{"dev"})) {
+            if (value) |name| {
+                if (std.mem.eql(u8, name, "sse-dump")) return .{ .command = .dev_sse_dump };
+            }
+        }
         // Set rather than returned, unlike the four above it: this is the one
         // command that reads the config, so `--theme` has to survive being
         // written on either side of it.
