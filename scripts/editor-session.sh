@@ -177,4 +177,46 @@ if grep -qF 'not recorded' "$history_file"; then
 fi
 echo "editor-session: [history] enabled = false reaches the shell and holds"
 
+# --- a chord rebound from a project config reaches the editor ----------------
+#
+# The spec's own example: `newline` on ctrl+j. The decoder maps 0x0a to ctrl+j
+# and 0x0d to enter (src/shell/input/decoder.zig), so a `\012` is a ctrl+j and
+# a `\r` is a submit -- one drive proves the rebind fired *and* that enter
+# still submits.
+#
+# ctrl+j is unbound by default, so this is additive rather than a replacement.
+# The replacement case is unit-tested; what a pty adds is that the file was
+# found, read, parsed, resolved, and consulted by a real keypress.
+
+cat >"$config/tug/config.toml" <<'TOML'
+[keys]
+"ctrl+j" = "newline"
+TOML
+
+before=$(wc -l <"$history_file" | tr -d ' ')
+extra_env="XDG_CONFIG_HOME=$config"
+drive "sleep 1; printf 'first\012second'; sleep 1; printf '\r'; sleep 3; printf '\004'"
+after=$(wc -l <"$history_file" | tr -d ' ')
+
+if [ "$before" = "$after" ]; then
+    fail "nothing was submitted: ctrl+j may have submitted instead of inserting"
+fi
+grep -qF 'first\nsecond' "$history_file" ||
+    fail "ctrl+j did not insert a newline; the project keymap never reached the shell"
+echo "editor-session: a chord rebound in .config reaches the keymap"
+
+# --- and a keymap typo is a warning, not a dead shell ------------------------
+
+cat >"$config/tug/config.toml" <<'TOML'
+[keys]
+"ctrl+nope" = "submit"
+"ctrl+j" = "newlin"
+TOML
+
+extra_env="XDG_CONFIG_HOME=$config"
+drive "sleep 1; printf 'still alive'; sleep 1; printf '\r'; sleep 3; printf '\004'"
+grep -q 'still alive' "$capture" ||
+    fail "a keymap with two bad entries stopped the shell from opening"
+echo "editor-session: a keymap typo warns and the shell still opens"
+
 echo "editor-session: the editor behaves"

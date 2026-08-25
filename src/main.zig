@@ -356,9 +356,19 @@ fn printConfig(
     defer loaded.deinit(gpa);
 
     try loaded.config.write(out);
-    if (loaded.config.notes().len > 0) {
+
+    // Resolved with `kitty = false`, because no terminal has been opened and no
+    // probe has run: this flag answers "what did tug read", not "what is live
+    // in that window". The `newline` row names the tier it is in, so the
+    // difference is on the screen rather than in a footnote.
+    const live: shell.keymap.Keymap = .build(&loaded.config, false);
+    try out.writeAll("\n");
+    try live.write(out);
+
+    if (loaded.config.notes().len > 0 or live.problems().len > 0) {
         try out.writeAll("\n");
         try loaded.config.writeNotes(out, loaded.origins);
+        try live.writeProblems(out, loaded.origins);
     }
 }
 
