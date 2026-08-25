@@ -24,6 +24,8 @@
 
 const std = @import("std");
 
+const core = @import("tugcore");
+
 const backend = @import("../term/backend.zig");
 const caps_mod = @import("../term/caps.zig");
 const md = @import("markdown.zig");
@@ -32,6 +34,8 @@ const width_mod = @import("width.zig");
 
 pub const Size = backend.Size;
 pub const Capabilities = caps_mod.Capabilities;
+pub const ColorTier = caps_mod.ColorTier;
+pub const Theme = core.theme.Theme;
 
 pub const BlockKind = enum { user, assistant, notice };
 
@@ -69,30 +73,113 @@ const min_cols: usize = 2;
 /// arithmetic and the screen agree, which is the thing that must not drift.
 const tab_width: usize = 4;
 
-fn isPlain(style: md.Style) bool {
-    return @as(u8, @bitCast(style)) == 0;
+/// Whether this style would put any bytes on the terminal at all.
+///
+/// Not `@bitCast(style) == 0`, which is what it was before slots existed and
+/// what quietly stopped being the same question. A style naming
+/// `assistant_block` has a non-zero bit pattern and — in both built-in themes,
+/// and at the `none` tier in every theme — emits nothing, and a `from` that
+/// emitted nothing needs no reset. Getting this wrong costs four bytes a line
+/// and shows up in every golden at once, which is how it was found.
+fn emitsNothing(style: md.Style, theme: Theme, tier: ColorTier) bool {
+    if (style.bold or style.italic) return false;
+    // Code always says so somehow: a background colour where there is one, and
+    // the dim attribute where there is not.
+    if (style.code_bg) return false;
+    if (encode(theme.color(style.slot), tier) != null) return false;
+    return core.theme.fallbackAttribute(style.slot) == .none;
 }
 
-/// The bytes that move the terminal from `from` to `to`.
+/// Every style transition fits in this. The longest is a reset followed by a
+/// truecolor foreground and a truecolor background.
+const style_bytes_max = 64;
+
+/// The bytes that move the terminal from `from` to `to`, under this theme and
+/// this tier.
 ///
-/// SGR 22 turns off bold *and* dim together, so an incremental encoding would
-/// have to track which of the two a `22` was meant to clear. A reset costs four
-/// bytes and removes the question — and is skipped entirely when there is
-/// nothing to reset, which is what keeps a plain paragraph free of escapes.
-fn styleBytes(from: md.Style, to: md.Style, buffer: *[16]u8) []const u8 {
+/// SGR 22 turns off bold *and* dim together, SGR 39 only the foreground and SGR
+/// 49 only the background; an incremental encoding would have to track which of
+/// five things each transition was meant to clear. A reset costs four bytes and
+/// removes the question — and is skipped entirely when there is nothing to
+/// reset, which is what keeps a plain paragraph free of escapes.
+///
+/// **A slot with no colour becomes its attribute.** `default` and the `none`
+/// tier reach that from opposite sides and land in the same branch, which is
+/// why `NO_COLOR` is a first-class tier here rather than a subtraction: a
+/// notice is dim either way, and every distinction the renderer draws survives
+/// the colour being taken away.
+fn styleBytes(
+    from: md.Style,
+    to: md.Style,
+    theme: Theme,
+    tier: ColorTier,
+    buffer: *[style_bytes_max]u8,
+) []const u8 {
     var len: usize = 0;
     const put = struct {
-        fn f(buf: *[16]u8, n: *usize, bytes: []const u8) void {
+        fn f(buf: *[style_bytes_max]u8, n: *usize, bytes: []const u8) void {
             @memcpy(buf[n.*..][0..bytes.len], bytes);
             n.* += bytes.len;
         }
     }.f;
 
-    if (!isPlain(from)) put(buffer, &len, "\x1b[0m");
+    if (!emitsNothing(from, theme, tier)) put(buffer, &len, "\x1b[0m");
     if (to.bold) put(buffer, &len, "\x1b[1m");
-    if (to.dim) put(buffer, &len, "\x1b[2m");
     if (to.italic) put(buffer, &len, "\x1b[3m");
+
+    const foreground = encode(theme.color(to.slot), tier);
+    const background = if (to.code_bg) encode(theme.code_bg, tier) else null;
+
+    // The monochrome fallbacks, taken when there is no colour to say it with.
+    // Code dims because a code block that is neither shaded nor dimmed is
+    // indistinguishable from the prose around it, which is the accessibility
+    // rule failing rather than a colour merely going missing.
+    var attribute: core.theme.Attribute =
+        if (foreground == null) core.theme.fallbackAttribute(to.slot) else .none;
+    if (to.code_bg and background == null and attribute == .none) attribute = .dim;
+    switch (attribute) {
+        .none => {},
+        .bold => if (!to.bold) put(buffer, &len, "\x1b[1m"),
+        .dim => put(buffer, &len, "\x1b[2m"),
+    }
+
+    if (foreground) |value| len += writeColor(buffer[len..], value, false);
+    if (background) |value| len += writeColor(buffer[len..], value, true);
+
     return buffer[0..len];
+}
+
+/// What a colour is at this tier: null when there is nothing to emit, an RGB
+/// triple at truecolor, and a palette index at ansi256.
+const Encoded = union(enum) { rgb: core.theme.Rgb, index: u8 };
+
+fn encode(color: core.theme.Color, tier: ColorTier) ?Encoded {
+    return switch (color) {
+        .default => null,
+        .rgb => |rgb| switch (tier) {
+            .none => null,
+            .ansi256 => .{ .index = core.theme.quantize(rgb) },
+            .truecolor => .{ .rgb = rgb },
+        },
+    };
+}
+
+/// `\x1b[38;2;R;G;Bm` or `\x1b[38;5;Nm`, and the 48 forms for a background.
+/// Returns how many bytes were written; nineteen is the longest.
+fn writeColor(buffer: []u8, value: Encoded, background: bool) usize {
+    const lead: []const u8 = if (background) "48" else "38";
+    const written = switch (value) {
+        .rgb => |rgb| std.fmt.bufPrint(
+            buffer,
+            "\x1b[{s};2;{d};{d};{d}m",
+            .{ lead, rgb.r, rgb.g, rgb.b },
+        ),
+        .index => |index| std.fmt.bufPrint(buffer, "\x1b[{s};5;{d}m", .{ lead, index }),
+        // The buffer is 64 bytes and the longest possible pair is 38, so this
+        // cannot happen. If it ever does, emitting nothing is a wrong colour
+        // rather than a truncated escape sequence in somebody's scrollback.
+    } catch return 0;
+    return written.len;
 }
 
 /// The longest complete UTF-8 prefix of `bytes`.
@@ -138,6 +225,12 @@ pub const Renderer = struct {
     gpa: std.mem.Allocator,
     caps: Capabilities,
     size: Size,
+
+    /// The active theme. Defaults to the one that emits nothing, so a renderer
+    /// built before any config has been read paints exactly as Phase 8 did —
+    /// which is what the first paint in `repl.run` relies on, and what makes
+    /// every golden written before this phase its regression net.
+    theme: Theme = .fallback,
 
     /// Every logical line's bytes, back to back. `Line` ranges index into this.
     text: std.ArrayList(u8) = .empty,
@@ -206,6 +299,17 @@ pub const Renderer = struct {
     /// 10 ms budget, and the probe's answers arrive a frame later.
     pub fn setCaps(self: *Renderer, value: Capabilities) void {
         self.caps = value;
+    }
+
+    /// Installs a theme. The next paint uses it; committed scrollback keeps the
+    /// colours it was printed in.
+    ///
+    /// That is not a limitation to be apologised for, it is the same
+    /// append-only principle as everything else here: tug does not move the
+    /// cursor back over scrollback, so it cannot recolour it, so it does not
+    /// pretend to. `/theme` in Phase 10 is three lines that call this.
+    pub fn setTheme(self: *Renderer, value: Theme) void {
+        self.theme = value;
     }
 
     /// Clears the screen and forgets the tail.
@@ -293,13 +397,18 @@ pub const Renderer = struct {
     fn baseStyle(entry: Entry) md.Style {
         var style: md.Style = .{};
         switch (entry.block) {
-            .assistant => {},
-            .user => style.bold = true,
-            .notice => style.dim = true,
+            .assistant => style.slot = .assistant_block,
+            .user => style.slot = .user_block,
+            .notice => style.slot = .notice,
         }
         switch (entry.line.kind) {
-            .heading => style.bold = true,
-            .code => style.dim = true,
+            // A heading is bold *and* accented: the attribute is what survives
+            // at the `none` tier, and the colour is what a theme adds on top.
+            .heading => {
+                style.bold = true;
+                style.slot = .accent;
+            },
+            .code => style.code_bg = true,
             else => {},
         }
         return style;
@@ -410,7 +519,29 @@ pub const Renderer = struct {
         if (hint) frame.tail_rows += try self.renderHint(out);
 
         if (self.prompt) |draft| {
+            // The draft is coloured as a whole rather than only its `> `,
+            // because `prompt.zig` writes no escape sequences at all and
+            // teaching it to would mean teaching it the row arithmetic of
+            // zero-width bytes. Colouring the region is one emit and one reset
+            // around a call that already exists, and the reset lands before the
+            // cursor moves, so the parked cursor is never inside a styled state.
+            var style_buffer: [style_bytes_max]u8 = undefined;
+            const prompt_style: md.Style = .{ .slot = .prompt };
+            try out.writeAll(styleBytes(
+                .{},
+                prompt_style,
+                self.theme,
+                self.caps.color,
+                &style_buffer,
+            ));
             const placed = try prompt_mod.render(draft, self.size.cols, capacity, out);
+            try out.writeAll(styleBytes(
+                prompt_style,
+                .{},
+                self.theme,
+                self.caps.color,
+                &style_buffer,
+            ));
             frame.tail_rows += placed.rows;
             frame.cursor_row = placed.cursor_row;
             frame.cursor_col = placed.cursor_col;
@@ -486,7 +617,7 @@ pub const Renderer = struct {
     fn renderHint(self: *Renderer, out: ?*std.Io.Writer) Error!u32 {
         const cols: usize = @max(min_cols, self.size.cols);
         const fits = truncateToWidth(status_hint, cols);
-        const rows = try self.wrap(fits, .{ .dim = true }, "", true, out);
+        const rows = try self.wrap(fits, .{ .slot = .dim }, "", true, out);
         std.debug.assert(rows == 1);
         if (out) |writer| try writer.writeAll("\r\n");
         return rows;
@@ -515,10 +646,10 @@ pub const Renderer = struct {
         var literal = true;
 
         switch (block) {
-            .user => style.bold = true,
-            .notice => style.dim = true,
+            .user => style.slot = .user_block,
+            .notice => style.slot = .notice,
             .assistant => if (self.in_fence) {
-                style.dim = true;
+                style.code_bg = true;
             } else {
                 // Block classification is a prefix scan, so it is already
                 // decided on a line that has only half arrived: `# ` is a
@@ -529,7 +660,12 @@ pub const Renderer = struct {
                 const classified = md.classify(content, false);
                 content = content[@min(classified.marker_len, content.len)..];
                 marker_text = markerFor(classified.kind, classified.level, &marker_buffer);
-                if (classified.kind == .heading) style.bold = true;
+                if (classified.kind == .heading) {
+                    style.bold = true;
+                    style.slot = .accent;
+                } else {
+                    style.slot = .assistant_block;
+                }
                 literal = false;
             },
         }
@@ -576,6 +712,8 @@ pub const Renderer = struct {
             .column = width_of_marker,
             .current = base,
             .word_style = base,
+            .theme = self.theme,
+            .tier = self.caps.color,
         };
         self.word.clearRetainingCapacity();
 
@@ -681,6 +819,11 @@ const Wrap = struct {
     /// The style in force where the pending word begins, so a row break can
     /// re-open it before replaying the word.
     word_style: md.Style,
+    /// Borrowed from the renderer for the length of one `wrap`. A copy rather
+    /// than a pointer: a `Theme` is nine tagged unions, and copying it once per
+    /// logical line is cheaper than an indirection on every style change.
+    theme: Theme,
+    tier: ColorTier,
     word_cells: usize = 0,
     /// Spaces seen since the last word. Held back so a break at a space does
     /// not leave trailing whitespace in scrollback.
@@ -690,8 +833,8 @@ const Wrap = struct {
     fn emitStyle(self: *Wrap, style: md.Style) Error!void {
         if (@as(u8, @bitCast(style)) == @as(u8, @bitCast(self.emitted))) return;
         if (self.out) |writer| {
-            var buffer: [16]u8 = undefined;
-            try writer.writeAll(styleBytes(self.emitted, style, &buffer));
+            var buffer: [style_bytes_max]u8 = undefined;
+            try writer.writeAll(styleBytes(self.emitted, style, self.theme, self.tier, &buffer));
         }
         self.emitted = style;
     }
@@ -705,8 +848,11 @@ const Wrap = struct {
         } else {
             // Mid-word: the escape rides along inside the word so a row break
             // replays it in the right place.
-            var buffer: [16]u8 = undefined;
-            try self.word.appendSlice(self.gpa, styleBytes(self.current, style, &buffer));
+            var buffer: [style_bytes_max]u8 = undefined;
+            try self.word.appendSlice(
+                self.gpa,
+                styleBytes(self.current, style, self.theme, self.tier, &buffer),
+            );
         }
         self.current = style;
     }
@@ -791,6 +937,166 @@ fn paintOnce(renderer: *Renderer, buffer: []u8, sink: []u8) !Painted {
     const frame = try renderer.paint(&counting.writer);
     try counting.writer.flush();
     return .{ .frame = frame, .output = counting.bytes(), .writes = counting.writes };
+}
+
+/// A theme with one slot coloured, so a test can name a byte string.
+fn themed(slot: core.theme.Slot, rgb: core.theme.Rgb) Theme {
+    var theme: Theme = .fallback;
+    theme.foreground[@intFromEnum(slot)] = .{ .rgb = rgb };
+    return theme;
+}
+
+test "the style byte is still one byte" {
+    // Every style comparison in the wrapper is a `@bitCast(u8)`. A slot that
+    // did not fit would silently make two different styles compare equal.
+    try testing.expectEqual(@as(usize, 1), @sizeOf(md.Style));
+    try testing.expectEqual(@as(u8, 0), @as(u8, @bitCast(md.Style{})));
+}
+
+test "a slot with no colour costs no bytes, at any tier" {
+    // The property the twenty-one goldens written before this phase rest on,
+    // stated directly so a change to `styleBytes` fails here first rather than
+    // in twenty-one files somebody has to read a diff of.
+    var buffer: [style_bytes_max]u8 = undefined;
+    const theme: Theme = .fallback;
+    for ([_]ColorTier{ .none, .ansi256, .truecolor }) |tier| {
+        try testing.expectEqualStrings(
+            "",
+            styleBytes(.{}, .{ .slot = .fg }, theme, tier, &buffer),
+        );
+        // And the one that caught the bug: a non-zero bit pattern that still
+        // emits nothing must not provoke a reset on the way out of it.
+        try testing.expectEqualStrings(
+            "",
+            styleBytes(.{ .slot = .assistant_block }, .{}, theme, tier, &buffer),
+        );
+    }
+}
+
+test "a slot degrades to its attribute when there is no colour" {
+    var buffer: [style_bytes_max]u8 = undefined;
+    const theme: Theme = .fallback;
+
+    // NO_COLOR, and the exact bytes Phase 8 emitted for a notice.
+    try testing.expectEqualStrings(
+        "\x1b[2m",
+        styleBytes(.{}, .{ .slot = .notice }, theme, .none, &buffer),
+    );
+    // And for the user's own words.
+    try testing.expectEqualStrings(
+        "\x1b[1m",
+        styleBytes(.{}, .{ .slot = .user_block }, theme, .none, &buffer),
+    );
+    // And for code.
+    try testing.expectEqualStrings(
+        "\x1b[2m",
+        styleBytes(.{}, .{ .code_bg = true }, theme, .none, &buffer),
+    );
+}
+
+test "a coloured slot emits the tier's encoding and no attribute" {
+    var buffer: [style_bytes_max]u8 = undefined;
+    const theme = themed(.notice, .{ .r = 0xdc, .g = 0xdc, .b = 0xaa });
+
+    try testing.expectEqualStrings(
+        "\x1b[38;2;220;220;170m",
+        styleBytes(.{}, .{ .slot = .notice }, theme, .truecolor, &buffer),
+    );
+    // 187 is the quantization of #dcdcaa, asserted by name in `core/theme.zig`.
+    try testing.expectEqualStrings(
+        "\x1b[38;5;187m",
+        styleBytes(.{}, .{ .slot = .notice }, theme, .ansi256, &buffer),
+    );
+    // ...and at `none` the attribute is what is left, which is the whole of
+    // "no meaning carried by colour alone".
+    try testing.expectEqualStrings(
+        "\x1b[2m",
+        styleBytes(.{}, .{ .slot = .notice }, theme, .none, &buffer),
+    );
+}
+
+test "code_bg is a background and composes with a foreground slot" {
+    var buffer: [style_bytes_max]u8 = undefined;
+    var theme = themed(.user_block, .{ .r = 0x9c, .g = 0xdc, .b = 0xfe });
+    theme.code_bg = .{ .rgb = .{ .r = 0x2d, .g = 0x2d, .b = 0x2d } };
+
+    try testing.expectEqualStrings(
+        "\x1b[38;2;156;220;254m\x1b[48;2;45;45;45m",
+        styleBytes(.{}, .{ .slot = .user_block, .code_bg = true }, theme, .truecolor, &buffer),
+    );
+}
+
+test "leaving a style resets first, exactly as it did before colour existed" {
+    var buffer: [style_bytes_max]u8 = undefined;
+    const theme = themed(.accent, .{ .r = 0x4e, .g = 0xc9, .b = 0xb0 });
+
+    // SGR 22 turns off bold *and* dim together and SGR 39 only the foreground;
+    // a reset is four bytes and removes every question about which of them a
+    // given transition needed.
+    try testing.expectEqualStrings(
+        "\x1b[0m",
+        styleBytes(.{ .slot = .accent }, .{}, theme, .truecolor, &buffer),
+    );
+    try testing.expectEqualStrings(
+        "\x1b[0m\x1b[1m\x1b[38;2;78;201;176m",
+        styleBytes(
+            .{ .slot = .notice },
+            .{ .bold = true, .slot = .accent },
+            theme,
+            .truecolor,
+            &buffer,
+        ),
+    );
+}
+
+test "a heading is bold at every tier and accented only where there is colour" {
+    // The accessibility rule at the level it is actually drawn: the attribute
+    // is what survives, and the colour is what a theme adds on top of it.
+    var buffer: [style_bytes_max]u8 = undefined;
+    const theme = themed(.accent, .{ .r = 0x4e, .g = 0xc9, .b = 0xb0 });
+    const heading: md.Style = .{ .bold = true, .slot = .accent };
+
+    try testing.expectEqualStrings(
+        "\x1b[1m",
+        styleBytes(.{}, heading, theme, .none, &buffer),
+    );
+    try testing.expectEqualStrings(
+        "\x1b[1m\x1b[38;2;78;201;176m",
+        styleBytes(.{}, heading, theme, .truecolor, &buffer),
+    );
+}
+
+test "setting a theme changes the next frame and not the row arithmetic" {
+    var renderer: Renderer = .init(testing.allocator, .{
+        .color = .truecolor,
+        .kitty_keyboard = false,
+        .synchronized_output = false,
+        .bracketed_paste = true,
+        .size = .{ .cols = 20, .rows = 10 },
+    }, .{ .cols = 20, .rows = 10 });
+    defer renderer.deinit();
+
+    try renderer.beginBlock(.notice);
+    try renderer.feed("hello\n");
+
+    var buffer: [4096]u8 = undefined;
+    var sink: [4096]u8 = undefined;
+    const before = try paintOnce(&renderer, &buffer, &sink);
+    // The fallback theme leaves a notice to the dim attribute.
+    try testing.expect(std.mem.indexOf(u8, before.output, "\x1b[2m") != null);
+    try testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, before.output, "38;2;"));
+
+    renderer.setTheme(themed(.notice, .{ .r = 0xdc, .g = 0xdc, .b = 0xaa }));
+
+    var buffer2: [4096]u8 = undefined;
+    var sink2: [4096]u8 = undefined;
+    const after = try paintOnce(&renderer, &buffer2, &sink2);
+
+    // The colour is on the tail now, the dim fallback is not, and the tail is
+    // exactly as tall as it was — `setTheme` changes bytes, never rows.
+    try testing.expect(std.mem.indexOf(u8, after.output, "\x1b[38;2;220;220;170m") != null);
+    try testing.expectEqual(before.frame.tail_rows, after.frame.tail_rows);
+    try testing.expectEqual(before.frame.committed_rows, after.frame.committed_rows);
 }
 
 test "an empty renderer paints nothing at all" {

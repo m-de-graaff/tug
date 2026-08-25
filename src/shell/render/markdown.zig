@@ -14,14 +14,29 @@
 
 const std = @import("std");
 
-/// Styling is attributes only — bold, dim, italic. There is no colour anywhere
-/// in Phase 4: colour is a theme slot, themes are Phase 9, and a renderer that
-/// hardcodes colours now is a renderer Phase 9 has to unpick.
+const core = @import("tugcore");
+
+/// What a run of bytes looks like.
+///
+/// Two attributes and a **slot** — a name for what the text *means*, which only
+/// a theme turns into a colour. There is still no colour anywhere in this file:
+/// the inline parser sets `bold`, `italic` and `code_bg`, and the slot arrives
+/// from the block the line belongs to. That is the whole reason a slot exists
+/// rather than an `Rgb` — markdown does not know what a notice looks like, and
+/// the renderer does not either.
+///
+/// Exactly one byte, and it has to stay one byte: every style comparison in the
+/// wrapper is a `@bitCast(u8)`, and a `Style` that did not fit would make two
+/// different styles compare equal in a way no test would obviously catch.
 pub const Style = packed struct(u8) {
     bold: bool = false,
-    dim: bool = false,
     italic: bool = false,
-    _padding: u5 = 0,
+    /// Drawn on the theme's one background colour. A flag rather than a ninth
+    /// slot because `Slot` is the *foreground* enum and a ninth value would
+    /// cost the byte above.
+    code_bg: bool = false,
+    slot: core.theme.Slot = .fg,
+    _padding: u2 = 0,
 };
 
 pub const LineKind = enum { blank, paragraph, heading, bullet, ordered, code };
@@ -120,7 +135,7 @@ pub const Inline = struct {
         if (std.mem.startsWith(u8, rest, "`")) {
             if (std.mem.indexOfPos(u8, self.text, index + 1, "`")) |close| {
                 if (close > index + 1) {
-                    return .{ .marker = 1, .content_end = close, .style = .{ .dim = true } };
+                    return .{ .marker = 1, .content_end = close, .style = .{ .code_bg = true } };
                 }
             }
             return null;
@@ -147,8 +162,11 @@ pub const Inline = struct {
     fn merge(base: Style, overlay: Style) Style {
         return .{
             .bold = base.bold or overlay.bold,
-            .dim = base.dim or overlay.dim,
             .italic = base.italic or overlay.italic,
+            .code_bg = base.code_bg or overlay.code_bg,
+            // The slot is the line's, never the span's: inline markup says
+            // *emphasis*, not *what kind of text this is*.
+            .slot = base.slot,
         };
     }
 
@@ -270,7 +288,7 @@ test "bold, italic and code become styled pieces without their markers" {
 
     const code = it.next().?;
     try testing.expectEqualStrings("f", code.bytes);
-    try testing.expect(code.style.dim);
+    try testing.expect(code.style.code_bg);
 
     try testing.expectEqual(@as(?Piece, null), it.next());
 }
@@ -285,7 +303,7 @@ test "markers inside a code span are literal" {
     var it: Inline = .init("`a **b** c`", .{});
     const code = it.next().?;
     try testing.expectEqualStrings("a **b** c", code.bytes);
-    try testing.expect(code.style.dim);
+    try testing.expect(code.style.code_bg);
     try testing.expectEqual(@as(?Piece, null), it.next());
 }
 
@@ -294,7 +312,7 @@ test "the base style is inherited by every piece" {
     const plain = it.next().?;
     try testing.expect(plain.style.bold);
     const code = it.next().?;
-    try testing.expect(code.style.bold and code.style.dim);
+    try testing.expect(code.style.bold and code.style.code_bg);
 }
 
 test "an empty span is literal text, not an empty piece" {
