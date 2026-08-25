@@ -122,6 +122,20 @@ jobs:
       - run: zig build
       - run: sh scripts/first-paint.sh zig-out/bin/tug
 
+  idle-budget:
+    name: idle under 10 MiB and 0% CPU
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # Both numbers were measured by hand on a Linux pty in Phase 3 and by
+      # nothing since. A loop that starts busy-waiting is what this catches, and
+      # no other gate in this file can see it.
+      - run: zig build
+      - run: sh scripts/idle-budget.sh zig-out/bin/tug
+
   # --- platform -----------------------------------------------------------
 
   windows-compile:
@@ -211,6 +225,7 @@ jobs:
         size,
         version-latency,
         first-paint,
+        idle-budget,
         windows-compile,
         mock-modes,
         editor-session,
