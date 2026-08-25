@@ -606,6 +606,11 @@ pub const Setup = struct {
     /// Where the config files are and what the environment says about them.
     /// Read after the first paint — see `run`.
     config: config_mod.Sources = .{},
+    /// When set, `run` stamps it the instant the first frame reaches the
+    /// terminal and returns without entering the loop. This is the cold-start
+    /// budget's only measurement point: everything above the stamp is startup,
+    /// and everything below it is a shell already on screen.
+    first_paint: ?*std.Io.Clock.Timestamp = null,
 };
 
 /// Opens the shell and does not return until the user leaves it.
@@ -666,6 +671,14 @@ pub fn run(
     renderer.setPrompt(.{ .text = "", .cursor = 0 });
     _ = try renderer.paint(screen);
     try screen.flush();
+
+    // The cold-start budget's far end. Returning here is safe because every
+    // resource above this line is released by a `defer` and nothing below it
+    // has been reached — there is nothing else to undo.
+    if (setup.first_paint) |slot| {
+        slot.* = .now(io, .awake);
+        return;
+    }
 
     // After the first paint, for the reason the probe is: the cold-start budget
     // is 10 ms and two file reads are not free. Nothing above this line reads a

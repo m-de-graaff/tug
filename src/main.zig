@@ -67,10 +67,12 @@ const usage =
     \\  --caps             Print detected terminal capabilities and exit.
     \\  --debug-keys       Echo decoded key events until ctrl+c.
     \\  --debug-config     Print the resolved config with provenance and exit.
+    \\  --debug-first-paint
+    \\                     Paint one frame, report the microseconds it took, exit.
     \\
 ;
 
-const Command = enum { help, version, caps, debug_keys, debug_config, mock, shell };
+const Command = enum { help, version, caps, debug_keys, debug_config, debug_first_paint, mock, shell };
 
 /// Which provider answers a turn. An enum rather than a bool because v0.2 adds
 /// two more and this is where they will land.
@@ -91,6 +93,15 @@ const Options = struct {
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+
+    // The cold-start budget is measured from here: the first point in the
+    // program that can read a clock. Above it is nothing; below it is every
+    // byte of startup, up to and including the flush of the first frame.
+    // `--debug-first-paint` is what reports the difference.
+    const entered: std.Io.Clock.Timestamp = .now(io, .awake);
+
     // Before any output, including the two paths that never open a terminal.
     shell.backend.useUtf8();
     defer shell.backend.restoreUtf8();
@@ -103,9 +114,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // borrowed for as long as this function runs.
     var environment_buffer: [environment_buffer_size]u8 = undefined;
     var environment_allocator: std.heap.FixedBufferAllocator = .init(&environment_buffer);
-
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
@@ -134,6 +142,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 environment_allocator.allocator(),
                 options,
             );
+            return stdout.flush();
+        },
+        .debug_first_paint => {
+            const environment = readEnvironment(init.environ, environment_allocator.allocator());
+            var painted: std.Io.Clock.Timestamp = undefined;
+            try shell.repl.run(std.heap.smp_allocator, io, stdout, .{
+                .env = environment.caps,
+                // No history file and no config: this measures the path a cold
+                // start actually takes, and both of those are read *after* the
+                // first paint by design.
+                .history_path = null,
+                .provider = null,
+                .first_paint = &painted,
+            });
+            const elapsed = entered.durationTo(painted).raw.nanoseconds;
+            try stdout.print("first paint: {d} us\n", .{@divTrunc(elapsed, 1000)});
             return stdout.flush();
         },
         .mock => return runMock(
@@ -206,6 +230,7 @@ fn parseArgs(argv: []const [:0]const u8) Options {
         if (eqlAny(arg, &.{ "--help", "-h" })) return .{ .command = .help };
         if (eqlAny(arg, &.{"--caps"})) return .{ .command = .caps };
         if (eqlAny(arg, &.{"--debug-keys"})) return .{ .command = .debug_keys };
+        if (eqlAny(arg, &.{"--debug-first-paint"})) return .{ .command = .debug_first_paint };
         // Set rather than returned, unlike the four above it: this is the one
         // command that reads the config, so `--theme` has to survive being
         // written on either side of it.
@@ -818,6 +843,16 @@ test "--theme composes with --debug-config, in either order" {
     const before = parseArgs(&.{ "tug", "--theme", "light", "--debug-config" });
     try testing.expectEqual(Command.debug_config, before.command);
     try testing.expectEqualStrings("light", before.theme.?);
+}
+
+test "--debug-first-paint is its own command" {
+    const options = parseArgs(&.{ "tug", "--debug-first-paint" });
+    try testing.expectEqual(Command.debug_first_paint, options.command);
+}
+
+test "--debug-first-paint outranks a provider, like the other debug commands" {
+    const options = parseArgs(&.{ "tug", "--provider", "mock", "--once", "--debug-first-paint" });
+    try testing.expectEqual(Command.debug_first_paint, options.command);
 }
 
 test "eqlAny matches any candidate and rejects the rest" {

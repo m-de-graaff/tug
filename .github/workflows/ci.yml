@@ -107,6 +107,21 @@ jobs:
       - run: zig build
       - run: sh scripts/bench-version.sh zig-out/bin/tug
 
+  first-paint:
+    name: cold start under 10 ms
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The roadmap's headline latency claim, and the one budget that could not
+      # be measured until Phase 6 gave the shell a prompt to paint. The binary
+      # times itself; the script says why that is more honest than wrapping a
+      # pty in hyperfine.
+      - run: zig build
+      - run: sh scripts/first-paint.sh zig-out/bin/tug
+
   # --- platform -----------------------------------------------------------
 
   windows-compile:
@@ -195,6 +210,7 @@ jobs:
         wasm,
         size,
         version-latency,
+        first-paint,
         windows-compile,
         mock-modes,
         editor-session,
