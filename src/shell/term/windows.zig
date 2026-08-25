@@ -198,8 +198,16 @@ pub fn open() (error{NotATerminal} || OpenError)!Impl {
 
     // GetConsoleMode succeeds only on a real console handle, which makes it the
     // isatty of this platform.
+    //
+    // Both handles, not just the input one. A process started from a console
+    // with its output redirected — `tug > out.txt`, or a build runner that
+    // pipes — has a console for stdin and a pipe for stdout, and checking only
+    // stdin let that through to `enterRaw`, which needs the output handle too
+    // and failed with a bare `error.Unexpected`. Refusing here instead is what
+    // produces "not a terminal: there is nothing to edit in" and exit 0.
     var mode: windows.DWORD = 0;
     if (GetConsoleMode(input, &mode) == 0) return error.NotATerminal;
+    if (GetConsoleMode(output, &mode) == 0) return error.NotATerminal;
 
     return .{ .input = input, .output = output };
 }

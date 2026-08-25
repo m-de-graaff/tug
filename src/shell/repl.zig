@@ -610,7 +610,12 @@ pub const Setup = struct {
     /// terminal and returns without entering the loop. This is the cold-start
     /// budget's only measurement point: everything above the stamp is startup,
     /// and everything below it is a shell already on screen.
-    first_paint: ?*std.Io.Clock.Timestamp = null,
+    ///
+    /// A pointer to an *optional*, so that "no paint happened" is a value the
+    /// caller can read rather than a stale one it cannot tell apart from a
+    /// measurement. `run` returns early when there is no terminal to open, and
+    /// a caller that printed the difference anyway printed nonsense.
+    first_paint: ?*?std.Io.Clock.Timestamp = null,
 };
 
 /// Opens the shell and does not return until the user leaves it.
@@ -639,8 +644,17 @@ pub fn run(
 
     // Sized so a whole frame fits without an intermediate flush, which is the
     // one-write-per-frame invariant as it reaches a real terminal.
-    var frame_buffer: [256 * 1024]u8 = undefined;
-    var terminal_writer = terminal.writer(io, &frame_buffer);
+    //
+    // On the heap rather than the stack, and that is not a style choice. A
+    // quarter of a megabyte is a quarter of the 1 MiB stack `build.zig` asks
+    // the linker for, which left the arithmetic close enough to the edge that
+    // adding a second caller of this function in Phase 11 tipped it over: the
+    // shell painted its prompt and then died of `STATUS_STACK_OVERFLOW` a few
+    // seconds later on Windows, where the guard page is what notices. The
+    // buffer is allocated once per session and freed with it.
+    const frame_buffer = try gpa.alloc(u8, 256 * 1024);
+    defer gpa.free(frame_buffer);
+    var terminal_writer = terminal.writer(io, frame_buffer);
     const screen = &terminal_writer.interface;
 
     var stack: modes.Stack = .{};

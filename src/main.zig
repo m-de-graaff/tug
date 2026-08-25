@@ -168,8 +168,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         },
         .debug_first_paint => {
             const environment = readEnvironment(init.environ, environment_allocator.allocator());
-            var painted: std.Io.Clock.Timestamp = undefined;
-            try shell.repl.run(std.heap.smp_allocator, io, stdout, .{
+            var painted: ?std.Io.Clock.Timestamp = null;
+            try shell.repl.run(sessionAllocator(), io, stdout, .{
                 .env = environment.caps,
                 // No history file and no config: this measures the path a cold
                 // start actually takes, and both of those are read *after* the
@@ -178,8 +178,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .provider = null,
                 .first_paint = &painted,
             });
-            const elapsed = entered.durationTo(painted).raw.nanoseconds;
-            try stdout.print("first paint: {d} us\n", .{@divTrunc(elapsed, 1000)});
+            // Nothing to report when nothing painted — `run` has already said
+            // why on its way out, and a number computed from a paint that never
+            // happened is worse than no number at all.
+            if (painted) |stamp| {
+                const elapsed = entered.durationTo(stamp).raw.nanoseconds;
+                try stdout.print("first paint: {d} us\n", .{@divTrunc(elapsed, 1000)});
+            }
             return stdout.flush();
         },
         .mock => return runMock(

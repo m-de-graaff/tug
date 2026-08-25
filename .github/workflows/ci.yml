@@ -171,6 +171,22 @@ jobs:
       # Terminal certification is explicitly not promised here.
       - run: zig build
       - run: zig build test
+      # A runner has no console, so what this asserts is the refusal: tug says
+      # so and exits 0 rather than failing with a bare `error.Unexpected`. That
+      # is a real regression this job could not previously see — `open()` used
+      # to check only the input handle, so a redirected stdout got past it and
+      # died in `enterRaw`.
+      #
+      # What this still cannot see is the shell actually running, because that
+      # needs a console. The stack overflow fixed in this phase was invisible to
+      # every gate in this file; see item 50 in the phase TODO.
+      - name: a redirected stdout is refused, not fumbled
+        shell: pwsh
+        run: |
+          $out = & .\zig-out\bin\tug.exe 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "expected exit 0, got $LASTEXITCODE : $out" }
+          if ($out -notmatch 'not a terminal') { throw "expected the refusal message, got: $out" }
+          Write-Output "refused cleanly: $out"
 
   mock-modes:
     name: every fault mode behaves
