@@ -3,7 +3,36 @@
 Every entry names what changed and what it costs. Budget changes and toolchain
 bumps are changelog events by policy, never silent.
 
-## Unreleased — v0.1 «Hull»
+## Unreleased — v0.2 «Halyard»
+
+### Changed
+
+**The binary-size ceiling moves from 500 KiB to 2 MiB**, the v0.2 number in the
+roadmap. v0.1's ceiling was the cost of a shell that could not talk to anything;
+this version adds TLS, an HTTP client and two providers. The v0.1 ratchet — the
+measured size plus ten per cent, 211 KiB — is suspended for the version rather
+than nudged upward commit by commit, and is re-derived from the measured size at
+the v0.2 tag. Until then the 2 MiB ceiling is the only live size gate.
+
+**The zero-network grep becomes a confinement grep** (`DR-016`). `std.http`,
+`std.Io.net` and `std.crypto.tls` are permitted under `src/providers/transport`
+and fail the build anywhere else, so the transport seam is enforced
+mechanically rather than by review. The claim narrows from "tug has no network
+code" to "tug's network code is reachable from exactly one directory" — the
+second being the one that can still be true in a version with providers in it.
+
+Two of the four patterns the v0.1 gate watched for, `std.net` and
+`std.posix.socket`, do not exist in Zig 0.16 at all; sockets live under
+`std.Io.net`. They stay in the pattern to catch snippets written against an
+older std, but a green gate had been proving less than it appeared to.
+
+### Added
+
+**Every test job runs inside a network namespace with no interfaces**
+(`scripts/offline.sh`). A grep constrains what is written; the namespace
+constrains what runs. A test that opens a socket fails rather than flaking.
+
+## v0.1.0 «Hull» — 2026-08-25
 
 ### Milestone 1 «Raw echo» — Phases 0 to 2
 

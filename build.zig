@@ -4,20 +4,25 @@ const std = @import("std");
 /// there is exactly one place it is written down.
 const version = "0.1.0";
 
-/// The v0.1 binary-size budget from the roadmap: 500 KiB, ReleaseSmall,
-/// stripped, static Linux x86_64. `zig build size` prints the number, and the
-/// CI gate fails the build when it is exceeded.
-const size_budget_bytes = 500 * 1024;
-
-/// The ratchet, tightened at the v0.1 freeze per Phase 11: the measured size
-/// plus ten per cent, floored to a whole KiB. The roadmap's ceiling above is
-/// what v0.1 *promised*; this is what v0.1 *costs*, and from v0.2 onward
-/// growing past it is a conscious act with a changelog line rather than a slow
-/// drift toward 500 KiB.
+/// The v0.2 binary-size budget from the roadmap: 2 MiB, ReleaseSmall, stripped,
+/// static Linux x86_64. `zig build size` prints the number, and the CI gate
+/// fails the build when it is exceeded.
 ///
-/// Measured at 196,984 B on 2026-08-25. Raising this number means editing this
-/// line, which shows up in a diff — which is the whole mechanism.
-const size_ratchet_bytes = 211 * 1024;
+/// The number moved from v0.1's 500 KiB because TLS, an HTTP client and two
+/// providers land inside this version. It moves once, here, with the changelog
+/// line the "budgets never silently loosen" rule requires.
+const size_budget_bytes = 2 * 1024 * 1024;
+
+/// The ratchet, tightened at the v0.1 freeze per Phase 11 to the measured size
+/// plus ten per cent — 211 KiB — and suspended for the duration of v0.2, whose
+/// provider stack would breach it on the first commit that links TLS.
+///
+/// A ratchet that fails on planned work is a ratchet nobody reads, so rather
+/// than being nudged upward all version long it is parked at the ceiling and
+/// re-derived from the measured size at the v0.2 tag (Phase 10). Until then the
+/// 2 MiB ceiling above is the only live gate, and `zig build size` keeps running
+/// both checks so restoring the real ratchet is one constant.
+const size_ratchet_bytes = size_budget_bytes;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
