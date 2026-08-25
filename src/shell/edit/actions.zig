@@ -33,6 +33,10 @@ pub const Action = enum {
     submit,
     newline,
     interrupt,
+    /// Leave, unconditionally. `end_of_input` is the graded version — quit on
+    /// an empty draft, delete forward otherwise — and this is the one somebody
+    /// binds to a function key when they want a door rather than a habit.
+    quit,
     end_of_input,
     clear_screen,
     move_left,
@@ -124,6 +128,7 @@ pub const Outcome = enum {
     handled,
     submit,
     interrupt,
+    quit,
     end_of_input,
     clear_screen,
     history_prev,
@@ -142,6 +147,7 @@ pub fn applyEdit(editor: *Editor, action: Action) std.mem.Allocator.Error!Outcom
     switch (action) {
         .submit => return .submit,
         .interrupt => return .interrupt,
+        .quit => return .quit,
         .end_of_input => return .end_of_input,
         .clear_screen => return .clear_screen,
         .history_prev => return .history_prev,
@@ -188,6 +194,7 @@ pub fn help(action: Action) []const u8 {
         .submit => "send the draft",
         .newline => "insert a line break without sending",
         .interrupt => "clear the draft, or stop a running response",
+        .quit => "leave tug",
         .end_of_input => "delete forward, or quit on an empty draft",
         .clear_screen => "clear the screen and repaint",
         .move_left => "move back one character",
@@ -206,6 +213,45 @@ pub fn help(action: Action) []const u8 {
         .yank => "paste the last cut",
         .history_prev => "recall the previous entry",
         .history_next => "recall the next entry",
+    };
+}
+
+/// What `/keys` groups by.
+///
+/// Four groups, because four is what fits on a screen without a scrollbar and
+/// because the fifth would be a judgement call rather than a fact: `yank` is
+/// editing, `history_prev` is history, and nothing in the list is ambiguous
+/// between them.
+pub const Category = enum { session, movement, editing, history };
+
+/// `move_up` and `move_down` are movement even though they fall through to
+/// history at the edges of the draft, because the chord is a cursor key and
+/// that is what somebody reading the list is looking for. Their help strings
+/// already say both things.
+pub fn category(action: Action) Category {
+    return switch (action) {
+        .submit, .interrupt, .quit, .end_of_input, .clear_screen => .session,
+
+        .move_left,
+        .move_right,
+        .move_word_left,
+        .move_word_right,
+        .move_line_start,
+        .move_line_end,
+        .move_up,
+        .move_down,
+        => .movement,
+
+        .newline,
+        .delete_back,
+        .delete_forward,
+        .kill_word_back,
+        .kill_to_line_start,
+        .kill_to_line_end,
+        .yank,
+        => .editing,
+
+        .history_prev, .history_next => .history,
     };
 }
 
@@ -341,6 +387,31 @@ test "up and down fall through to history at the edges of the draft" {
     try testing.expectEqual(Outcome.history_prev, try applyEdit(&editor, .move_up));
     try testing.expectEqual(Outcome.handled, try applyEdit(&editor, .move_down));
     try testing.expectEqual(Outcome.history_next, try applyEdit(&editor, .move_down));
+}
+
+test "quit is an action, and it does not touch the draft" {
+    var editor: Editor = .init(testing.allocator);
+    defer editor.deinit();
+
+    try editor.insert("half a message");
+    try testing.expectEqual(Outcome.quit, try applyEdit(&editor, .quit));
+    // Leaving is not clearing. The session decides what to do with the draft;
+    // the action layer does not throw it away on the way out.
+    try testing.expectEqualStrings("half a message", editor.items());
+}
+
+test "every action has a category" {
+    // A category is what `/keys` groups by. An action that has none would be
+    // an action that cannot appear on the screen listing the actions.
+    inline for (@typeInfo(Action).@"enum".fields) |field| {
+        const action: Action = @enumFromInt(field.value);
+        _ = category(action);
+    }
+    try testing.expectEqual(Category.session, category(.quit));
+    try testing.expectEqual(Category.session, category(.submit));
+    try testing.expectEqual(Category.movement, category(.move_word_left));
+    try testing.expectEqual(Category.editing, category(.kill_to_line_end));
+    try testing.expectEqual(Category.history, category(.history_prev));
 }
 
 test "an explicit history action never moves the cursor" {

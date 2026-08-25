@@ -179,10 +179,28 @@ pub const Session = struct {
             return;
         };
 
+        try self.applyAction(action);
+    }
+
+    /// Runs one named action. The only entry point below `applyKey` that
+    /// mentions an `Action`, which is what makes "adding an action touches the
+    /// registry and one handler" a fact about this file rather than a hope.
+    fn applyAction(self: *Session, action: actions.Action) !void {
         if (self.state == .streaming) {
-            // One chord matters mid-stream. Everything else would be editing a
+            // Two chords matter mid-stream. Everything else would be editing a
             // draft that is not on screen.
-            if (action == .interrupt) try self.interruptTurn();
+            switch (action) {
+                .interrupt => try self.interruptTurn(),
+                // `endTurn` first: leaving with a provider thread still pushing
+                // onto a queue whose frame is about to go is the one failure
+                // worse than a broken terminal, and it is the same ordering
+                // `run`'s defer relies on.
+                .quit => {
+                    self.endTurn();
+                    self.quitting = true;
+                },
+                else => {},
+            }
             return;
         }
 
@@ -192,6 +210,7 @@ pub const Session = struct {
             },
             .submit => try self.submit(),
             .interrupt => try self.interruptDraft(),
+            .quit => self.quitting = true,
             .end_of_input => try self.endOfInput(),
             .clear_screen => try self.renderer.clearScreen(self.screen),
             .history_prev => try self.recall(.previous),
@@ -768,6 +787,16 @@ test "the emacs kills and yank reach the editor through the action layer" {
     try testing.expectEqual(@as(usize, 0), harness.editor.cursor);
     try harness.press(.{ .key = .{ .char = 'k' }, .mods = .{ .ctrl = true } });
     try testing.expectEqualStrings("", harness.editor.items());
+}
+
+test "the quit action leaves, whatever is in the draft" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("mid sentence");
+    try harness.session.applyAction(.quit);
+    try testing.expect(harness.session.quitting);
 }
 
 test "a leftover delta from an interrupted turn is dropped" {
