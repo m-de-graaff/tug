@@ -9,6 +9,16 @@ const version = "0.1.0-dev";
 /// CI gate fails the build when it is exceeded.
 const size_budget_bytes = 500 * 1024;
 
+/// The ratchet, tightened at the v0.1 freeze per Phase 11: the measured size
+/// plus ten per cent, floored to a whole KiB. The roadmap's ceiling above is
+/// what v0.1 *promised*; this is what v0.1 *costs*, and from v0.2 onward
+/// growing past it is a conscious act with a changelog line rather than a slow
+/// drift toward 500 KiB.
+///
+/// Measured at 196,984 B on 2026-08-25. Raising this number means editing this
+/// line, which shows up in a diff — which is the whole mechanism.
+const size_ratchet_bytes = 211 * 1024;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
 
@@ -195,6 +205,11 @@ pub fn build(b: *std.Build) void {
     size_check.addFileArg(exe.getEmittedBin());
     size_check.addArg(b.fmt("{d}", .{size_budget_bytes}));
     size_step.dependOn(&size_check.step);
+
+    const ratchet_check = b.addSystemCommand(&.{ "sh", "scripts/size-gate.sh" });
+    ratchet_check.addFileArg(exe.getEmittedBin());
+    ratchet_check.addArg(b.fmt("{d}", .{size_ratchet_bytes}));
+    size_step.dependOn(&ratchet_check.step);
 
     // --- bench -------------------------------------------------------------
 

@@ -90,7 +90,12 @@ jobs:
       # The budget is stated for a static Linux x86_64 build, so it is measured
       # against exactly that and not against whatever the runner happens to be.
       - run: zig build -Dtarget=x86_64-linux-musl
+      # The roadmap's ceiling: what v0.1 promised.
       - run: sh scripts/size-gate.sh zig-out/bin/tug 512000
+      # The ratchet: what v0.1 costs, plus ten per cent. Keep this in step with
+      # `size_ratchet_bytes` in build.zig; a legitimate increase is a changelog
+      # line, per the roadmap's "budgets never silently loosen".
+      - run: sh scripts/size-gate.sh zig-out/bin/tug 216064
 
   version-latency:
     name: --version under 2 ms
