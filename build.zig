@@ -198,6 +198,22 @@ pub fn build(b: *std.Build) void {
     });
     wasm_step.dependOn(&wasm_core.step);
 
+    // --- fuzz --------------------------------------------------------------
+
+    // The decoder is the one component in v0.1 that parses untrusted input from
+    // outside the process, so it is the one with a fuzz target. Running the
+    // fuzzer is opt-in and local — `--fuzz` starts a server and does not
+    // terminate, which is not a shape a five-minute CI wall can hold. What CI
+    // gets is the seed corpus, replayed on every ordinary `zig build test`; the
+    // roadmap puts the real fuzzing job in v0.2.
+    const fuzz_step = b.step("fuzz", "Build the decoder fuzz target (add -- --fuzz to run it)");
+    const fuzz_tests = b.addTest(.{
+        .name = "tugshell-fuzz",
+        .root_module = shell,
+        .filters = &.{"fuzz:"},
+    });
+    fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
+
     // --- size --------------------------------------------------------------
 
     const size_step = b.step("size", "Print the installed binary size against its budget");

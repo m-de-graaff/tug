@@ -732,3 +732,51 @@ test "parameters parse, saturate, and default" {
     var huge = ParamIterator{ .bytes = "99999999999999999999" };
     try testing.expectEqual(@as(?u32, std.math.maxInt(u32)), huge.next());
 }
+
+/// The three invariants the decoder has to hold against any byte string,
+/// including ones no terminal would ever send: it never panics, it always
+/// terminates, and it never emits more events than it was given bytes.
+///
+/// `@setRuntimeSafety(true)` is already on the decoder's own scope, so a bounds
+/// or cast error in `ReleaseSmall` is a trap the fuzzer sees rather than
+/// undefined behaviour it does not.
+fn decodeOne(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [256]u8 = undefined;
+    const len = smith.slice(&input);
+
+    var scratch: [512]u8 = undefined;
+    var decoder: Decoder = .init(&scratch);
+    decoder.feed(input[0..len]);
+
+    var emitted: usize = 0;
+    while (decoder.next()) |_| {
+        emitted += 1;
+        try testing.expect(emitted <= len);
+    }
+    _ = decoder.flushPending();
+}
+
+test "fuzz: the decoder survives arbitrary bytes" {
+    // Outside fuzz mode the test runner replays this corpus once and then an
+    // empty input, so the target costs microseconds on an ordinary
+    // `zig build test` — which is the smoke Phase 11 asks for, at no
+    // wall-clock cost. `zig build fuzz -- --fuzz` is the real session, and the
+    // roadmap puts a CI fuzzing job in v0.2.
+    try std.testing.fuzz({}, decodeOne, .{
+        .corpus = &.{
+            // Seeds, so a session starts from shapes that mean something rather
+            // than from noise: every branch of the state machine, once.
+            "\x1b[A", // legacy cursor up
+            "\x1bOP", // SS3, F1
+            "\x1b[13;5u", // kitty CSI-u, ctrl+enter
+            "\x1b[200~pasted\x1b[201~", // bracketed paste
+            "\x1b[200~\x1b[A\x00\x1b[201~", // a paste that has to be sanitized
+            "\x1b", // the lone escape, and its deadline
+            "\xe4\xb8\xad", // a multi-byte codepoint, whole
+            "\xe4\xb8", // and truncated
+            "\x1b[999999999999999999;1m", // a parameter that has to saturate
+            "\x1b[", // an unterminated sequence
+            "\x1b_a very long unknown sequence that has to be swallowed to its cap",
+        },
+    });
+}
