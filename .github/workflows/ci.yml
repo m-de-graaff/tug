@@ -265,6 +265,21 @@ jobs:
       - run: zig build -Doptimize=Debug
       - run: sh scripts/soak-session.sh zig-out/bin/tug
 
+  valgrind:
+    name: memcheck (scoped)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      # ReleaseSafe, because Debug carries the DebugAllocator and that is a
+      # different gate catching different bugs. The scope is one mock turn until
+      # Phase 10 points this at the SSE parser, the mappers and the transport.
+      - run: zig build -Doptimize=ReleaseSafe
+      - run: sh scripts/offline.sh sh scripts/valgrind-scope.sh zig-out/bin/tug
+
   # --- the meta-gate ------------------------------------------------------
 
   wall-clock:
@@ -287,6 +302,7 @@ jobs:
         theme-session,
         command-session,
         soak-session,
+        valgrind,
       ]
     if: always()
     steps:

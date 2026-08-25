@@ -1,0 +1,62 @@
+name: nightly
+
+# The PR pipeline holds a five-minute wall, and `wall-clock` fails the run over
+# it. Deep fuzzing and a full-session valgrind cannot fit inside that, and
+# pretending otherwise is how a five-minute wall quietly becomes a fifteen-minute
+# one. They run here instead: a failure here pages the changelog, not the pull
+# request.
+#
+# Everything runs under scripts/offline.sh for the same reason the PR tests do —
+# a job that can reach the network is a job whose offline claim is untested.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned, per DR-001. Bumping this is a changelog event, never a surprise.
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  valgrind-full:
+    name: valgrind over a full session
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: zig build -Doptimize=ReleaseSafe
+      # The scripted thousand-interaction session from v0.1's leak gate, this
+      # time under memcheck rather than the DebugAllocator. Minutes, not seconds
+      # — which is why it lives here.
+      - run: sh scripts/offline.sh sh scripts/valgrind-scope.sh zig-out/bin/tug
+
+  fuzz-deep:
+    name: deep fuzz
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # `zig build fuzz -- --fuzz` starts a server and does not terminate, so the
+      # nightly gives it a wall-clock box and treats the timeout as success. A
+      # crash inside the box exits nonzero and is a real failure.
+      - name: fuzz for fifteen minutes
+        run: |
+          set -eu
+          status=0
+          timeout --preserve-status 900 \
+            sh scripts/offline.sh zig build fuzz -- --fuzz || status=$?
+          if [ "$status" -eq 143 ] || [ "$status" -eq 0 ]; then
+            echo "fuzz-deep: no crashes in 15 minutes"
+          else
+            echo "fuzz-deep: fuzzer exited $status" >&2
+            exit "$status"
+          fi
