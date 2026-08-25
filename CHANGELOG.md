@@ -452,11 +452,84 @@ completion case.
 Cost: 5,032 bytes, taking the binary to 196,520 — 38 % of the 500 KiB budget.
 Tests go from 375 to 411.
 
+### Milestone 5 «It's honest» — Phase 11
+
+**Every budget the roadmap states is now a job that prints a number and fails
+on it.** Four had never been measured by anything but a person on a good day.
+
+**Cold start, 0.33 ms against 10 ms.** `--debug-first-paint` paints one frame,
+reports the microseconds from `main`'s first clock read to that frame reaching
+the terminal, and exits. The binary times itself rather than a harness timing
+it, which is `DR-015`'s first decision: `hyperfine` would have to wrap
+`script -qec`, whose own fork and exec is a millisecond or more against a
+ten-millisecond budget, with no honest way to subtract it. What the
+self-measurement excludes — process spawn and dynamic loading — is covered from
+the other side by the 2 ms `--version` gate on a static binary.
+
+**Idle, 384 KiB and no CPU at all.** `scripts/idle-budget.sh` parks
+`--debug-keys` for five seconds and reads `VmHWM` and the tick counters out of
+`/proc`. `VmHWM` rather than `VmRSS`, because the budget is a ceiling and a
+peak that has since been paged out is still a peak that happened. A loop that
+starts busy-waiting is invisible to every other gate in the repo.
+
+**A thousand interactions, leak-free.** A Debug build swaps `smp_allocator` for
+`DebugAllocator` and exits nonzero when the session leaked; release keeps
+`smp_allocator` and pays nothing. `scripts/soak-session.sh` drives two hundred
+rounds of five — typing, an edit, a submit, a command, a theme switch, a resize
+— then every fault mode once, through tmux, because a resize needs something
+outside the process that can change a pty's window size while it runs.
+
+**That gate was wrong three times before it was right, and each way is worth
+recording.** Its first draft collected the shell's output from fd 1, where there
+is none — the shell paints through the terminal — so the file it grepped was
+empty and every assertion over it passed. It reads fd 2 now, plus the pane's own
+exit status, and counts the history file's entries, so a harness that drove
+nothing cannot claim a thousand interactions. Its second draft sent `ctrl+c` on
+a draft that a stream in flight had swallowed, which *arms* the exit rather than
+clearing anything, so the following round took it and the session left around
+round forty. And its third sent keys before `enterRaw`, while the tty still had
+`ISIG` on, which made that `ctrl+c` a `SIGINT` to the whole process group; it
+waits for the prompt to paint now.
+
+**The size budget is a ratchet as well as a ceiling.** 500 KiB is what v0.1
+promised and stays; 211 KiB — the measured 196,984 B plus ten per cent — is what
+v0.1 costs. From v0.2 onward, growing past it is a diff and a changelog line
+rather than a drift.
+
+**The decoder has a fuzz target.** Eleven seed inputs, one per branch of the
+state machine, asserting the three invariants the property test already asserted:
+never panics, always terminates, never emits more events than it was given
+bytes. Outside fuzz mode the runner replays the corpus, so it costs microseconds
+on every `zig build test` — that is the CI smoke. `zig build fuzz -- --fuzz` is
+the real session, and the roadmap puts a CI fuzzing job in v0.2, because a
+fuzzer that runs until interrupted is not a shape a five-minute wall can hold.
+
+**Terminals degrade rather than hang**, gated. Five rows a machine with no
+terminal emulator can produce — a bare pty at each of the three colour tiers,
+`TERM=dumb`, and inside tmux — assert Phase 1's probe-hygiene rule: on a
+terminal that answers neither query, `--caps` finishes inside its 50 ms budget.
+It used to hang forever, which is what makes this a gate rather than a
+decoration.
+
+**Documentation.** A README that gets from a clone to a streaming mock in sixty
+seconds and prints the measured budgets beside their limits;
+`docs/architecture.md` for the loop, the tail and the block model, each with a
+diagram and the bug that shaped it; `docs/configuration.md` for every setting,
+action, chord and theme slot; and `docs/terminal-matrix.md`.
+
+**What the matrix says, and it is the honest part of this release.** Four of its
+rows — kitty, alacritty, wezterm, ghostty — read `unrecorded`, because none of
+them has ever run tug. tug is developed on Windows against a WSL toolchain and
+none is installed there; CI runners have no terminal emulator either. The
+document carries the three commands that fill a row in. That is the one v0.1
+exit criterion no machine in this project's environment can close, and it has
+been open since Phase 4.
+
 ### Not yet
 
-Hardening — Phase 11. `/theme` with no argument lists the built-ins and the live
-theme, not the themes directory: reading it needs `std.Io.Dir` iteration, which
-nothing in tug does yet. Completion refuses an ambiguous prefix instead of
+Held over past v0.1, deliberately. `/theme` with no argument lists the built-ins
+and the live theme, not the themes directory: reading it needs `std.Io.Dir`
+iteration, which nothing in tug does yet. Completion refuses an ambiguous prefix instead of
 completing to the longest common one, because no two of the five names collide
 and the code would have no input. A command goes into the shared prompt history,
 which is the scope guard's "no command history separate from input history" and
