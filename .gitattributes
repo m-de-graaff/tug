@@ -23,3 +23,9 @@ testdata/golden/*.txt text eol=lf
 # `*.zig`, and a CRLF copy of it makes a whole-tree `zig fmt --check` red on
 # Windows for a reason that has nothing to do with the code.
 *.zon text eol=lf
+
+# Response fixtures are byte-exact recordings, and one of the things the SSE
+# parser is tested against is CRLF framing. A checkout that rewrote line endings
+# in either direction would silently change what the tests assert, so git is told
+# not to touch them at all.
+testdata/fixtures/** -text
