@@ -32,6 +32,7 @@ pub const width = @import("render/width.zig");
 pub const markdown = @import("render/markdown.zig");
 pub const prompt = @import("render/prompt.zig");
 pub const renderer = @import("render/renderer.zig");
+pub const theme = @import("theme/registry.zig");
 pub const repl = @import("repl.zig");
 pub const cadence = @import("provider/cadence.zig");
 pub const runner = @import("provider/runner.zig");

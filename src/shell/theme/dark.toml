@@ -1,0 +1,20 @@
+# tug's built-in dark theme.
+#
+# `default` means the terminal's own foreground: tug does not repaint the colour
+# you chose for your prose. The slots that name a colour are the ones that have
+# to be legible against a dark background, and every one of them is checked
+# against a #1e1e1e reference at 4.5:1 by a test in registry.zig — as written
+# *and* after 256-colour quantization, because the quantized colour is what an
+# ansi256 terminal actually paints.
+
+name = "dark"
+
+fg = "default"
+dim = "#9a9a9a"
+accent = "#4ec9b0"
+user_block = "#9cdcfe"
+assistant_block = "default"
+notice = "#dcdcaa"
+error = "#f48771"
+prompt = "#4ec9b0"
+code_bg = "#2d2d2d"

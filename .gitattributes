@@ -13,3 +13,13 @@
 # Golden transcripts are compared byte for byte against what the renderer
 # emitted, so a CRLF checkout would fail every one of them on Windows.
 testdata/golden/*.txt text eol=lf
+
+# TOML for the third variant of the same bug: the two built-in themes are
+# `@embedFile`d and parsed byte for byte, so a CRLF checkout would put a `\r`
+# on the end of every value and turn every colour into a `bad_color` warning.
+*.toml text eol=lf
+
+# `build.zig.zon` is a Zig source `zig fmt` also checks. It is not matched by
+# `*.zig`, and a CRLF copy of it makes a whole-tree `zig fmt --check` red on
+# Windows for a reason that has nothing to do with the code.
+*.zon text eol=lf

@@ -1,0 +1,18 @@
+# tug's built-in light theme.
+#
+# The same rules as dark.toml, measured against a #f5f5f5 reference. The
+# tightest pair in the whole set is `notice` on `code_bg` at ansi256: 4.50:1,
+# which passes with nothing to spare. If you change that colour, the test in
+# registry.zig is what tells you.
+
+name = "light"
+
+fg = "default"
+dim = "#595959"
+accent = "#0d6560"
+user_block = "#1d4ed8"
+assistant_block = "default"
+notice = "#854d0e"
+error = "#b91c1c"
+prompt = "#0d6560"
+code_bg = "#e6e6e6"

@@ -63,6 +63,30 @@ pub fn userPath(
     return null;
 }
 
+/// Where user themes live, or null when nothing in the environment names a
+/// directory to look in.
+///
+/// Beside the config file rather than under a data directory: a theme is a
+/// preference, and preferences live with the preferences. On Windows that means
+/// roaming `%APPDATA%`, for the reason `Location.app_data` gives.
+pub fn themesDir(
+    gpa: std.mem.Allocator,
+    where: Location,
+    windows: bool,
+) std.mem.Allocator.Error!?[]u8 {
+    if (windows) {
+        const base = where.app_data orelse return null;
+        return try std.fmt.allocPrint(gpa, "{s}\\tug\\themes", .{base});
+    }
+    if (where.xdg_config_home) |base| {
+        return try std.fmt.allocPrint(gpa, "{s}/tug/themes", .{base});
+    }
+    if (where.home) |base| {
+        return try std.fmt.allocPrint(gpa, "{s}/.config/tug/themes", .{base});
+    }
+    return null;
+}
+
 /// Everything the load needs that only `main` can find out. The environment
 /// values are indexed by `core.config.env_keys`, in that table's order.
 pub const Sources = struct {
