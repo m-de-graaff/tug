@@ -53,10 +53,14 @@ pub fn build(b: *std.Build) void {
     // The module graph is the architecture, so it exists before the code that
     // fills it. Each module may import only the ones above it in this list.
     //
-    //   tugproto   the wire vocabulary; depends on nothing
-    //   tugcore    sans-IO logic; must compile for wasm32-freestanding
-    //   tugshell   the terminal frontend
-    //   tug        the executable
+    //   tugproto      the wire vocabulary; depends on nothing
+    //   tugcore       sans-IO logic; must compile for wasm32-freestanding
+    //   tugproviders  SSE, transport, mappers; the only module with sockets
+    //   tugshell      the terminal frontend
+    //   tug           the executable
+    //
+    // `tugcore` deliberately sits above `tugproviders` in that list and does not
+    // import it: the core has to compile for a target with no sockets at all.
 
     const proto = b.addModule("tugproto", .{
         .root_source_file = b.path("src/proto/root.zig"),
@@ -72,12 +76,23 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The provider layer. Not freestanding, not imported by tugcore, and the
+    // only module whose `transport/` subtree may open a socket (DR-016).
+    const providers = b.addModule("tugproviders", .{
+        .root_source_file = b.path("src/providers/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "tugproto", .module = proto },
+        },
+    });
+
     const shell = b.addModule("tugshell", .{
         .root_source_file = b.path("src/shell/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "tugproto", .module = proto },
             .{ .name = "tugcore", .module = tugcore },
+            .{ .name = "tugproviders", .module = providers },
         },
     });
 
@@ -148,6 +163,7 @@ pub fn build(b: *std.Build) void {
     const test_targets = [_]struct { name: []const u8, module: *std.Build.Module }{
         .{ .name = "tugproto", .module = proto },
         .{ .name = "tugcore", .module = tugcore },
+        .{ .name = "tugproviders", .module = providers },
         .{ .name = "tugshell", .module = shell },
     };
 
