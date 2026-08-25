@@ -320,6 +320,9 @@ test "midstream_error gives up halfway with an err and an error stop" {
         },
         .stop => |s| stop_reason = s.reason,
         .usage => return error.UsageAfterFailure,
+        // The mock has no tools and never will: it exists to exercise the
+        // renderer, and a tool call it invented would exercise nothing.
+        .tool_call_delta => return error.MockDoesNotCallTools,
     };
 
     try testing.expect(saw_err);

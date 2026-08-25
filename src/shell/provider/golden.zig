@@ -111,7 +111,9 @@ fn run(
             try renderer.feed(failure.message);
             try renderer.feed("\n");
         },
-        .usage, .stop => {},
+        // The mock emits neither, and a golden that rendered a tool call would
+        // be pinning bytes nothing produces. Phase 7 renders the real notice.
+        .tool_call_delta, .usage, .stop => {},
     };
     try renderer.endBlock();
     try paintInto(&renderer, &frames, gpa);

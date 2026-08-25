@@ -64,6 +64,10 @@ pub const Runner = struct {
                 // v0.1 has nowhere to show a token count. The event exists so
                 // the seam is complete; `/context` in v0.3 is what consumes it.
                 .usage => {},
+                // Parsed but not executed, exactly as v0.2 is scoped. Phase 4
+                // adds the once-per-turn notice that says tools arrive in v0.3;
+                // dropping the fragments here is what "not executed" means.
+                .tool_call_delta => {},
                 .stop => break,
             }
         }
