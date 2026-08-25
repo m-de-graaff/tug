@@ -1,0 +1,14 @@
+\e[38;2;156;220;254msummarise this file\e[0m\r
+\e[1m\e[38;2;78;201;176mFindings\e[0m\r
+\r
+It is \e[1mmostly\e[0m fine, but \e[48;2;45;45;45mparse\e[0m is slow.\r
+\r
+• one\r
+• two\r
+\r
+\e[48;2;45;45;45mconst x = 1;\e[0m\r
+\r
+Done.\r
+\e[38;2;220;220;170mno provider configured\e[0m\r
+\e[38;2;78;201;176m> and now?\r
+\e[0m\e[1F\e[10C

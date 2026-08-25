@@ -1,0 +1,5 @@
+\e[38;2;220;220;170mbefore the switch\e[0m\r
+\e[38;2;78;201;176m> typing\r
+\e[0m\e[1F\e[8C\r\e[0J\e[38;2;133;77;14mafter the switch\e[0m\r
+\e[38;2;13;101;96m> typing\r
+\e[0m\e[1F\e[8C

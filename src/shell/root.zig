@@ -70,4 +70,5 @@ test {
     _ = @import("edit/golden.zig");
     _ = @import("provider/golden.zig");
     _ = @import("provider/firehose_test.zig");
+    _ = @import("theme/golden.zig");
 }
