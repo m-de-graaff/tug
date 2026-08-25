@@ -28,9 +28,39 @@ older std, but a green gate had been proving less than it appeared to.
 
 ### Added
 
+**An incremental SSE parser** (`tugproviders`), v0.2's untrusted input decoder,
+built like the terminal's: caller-owned buffers, `feed` then `next`, partial
+input is not an error, nothing grows, and a returned event borrows until the next
+call. Framing only — what a payload means belongs to the provider mappers, which
+is what lets one parser serve two very different APIs. 147 lines of code against
+the roadmap's promised ~150, with a fuzz target and a chunking-invariance
+property that feeds every corpus entry at twenty random splittings and requires
+identical events.
+
+**`tug dev sse-dump`** (debug builds only): raw bytes on stdin, decoded events on
+stdout. The milestone's demo and a permanent debugging tool.
+
+**Stream events grew what v0.2 will see on the wire**: `tool_call_delta` for the
+argument JSON both API shapes stream in pieces, cache-read and cache-creation
+token counts kept apart from fresh input because they are priced apart,
+`tool_use` and `refusal` stop reasons, and the retry-after a rate limit carries.
+Requests, messages and model descriptors became types, and prices became data —
+an unknown model renders tokens without a cost rather than guessing.
+
+**One ndjson encoding of a stream event**, flat and tagged, golden-tested byte for
+byte. The same bytes `--json` will print and plugins will speak, defined once so
+the two cannot drift.
+
 **Every test job runs inside a network namespace with no interfaces**
 (`scripts/offline.sh`). A grep constrains what is written; the namespace
 constrains what runs. A test that opens a socket fails rather than flaking.
+
+**A canary key and the grep that hunts it** (`scripts/canary-grep.sh`), plus a
+fixture layout whose sidecar attests what was checked. The gate exists before the
+auth code it guards, because one added after the first leak arrives late.
+
+**A nightly workflow** for deep fuzzing and a full-session memcheck, so the PR
+pipeline keeps its five-minute wall.
 
 ## v0.1.0 «Hull» — 2026-08-25
 
