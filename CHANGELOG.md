@@ -313,17 +313,98 @@ a flag reporting what was read rather than what is live in a window.
 Cost: 9,792 bytes, taking the binary to 182,880 — 35 % of the 500 KiB budget.
 Tests go from 296 to 325.
 
+**Phase 9, themes.** `theme = "light"` in a config file now changes what the
+shell looks like. The renderer stopped naming attributes and started naming
+**meanings**: `md.Style` carries a slot — `notice`, `user_block`, `accent`,
+`code_bg` and five more — and only a theme says what a slot's colour is
+(`DR-007`). It is still exactly one byte, which every style comparison in the
+wrapper depends on: eight foreground slots fit a `u3`, and `code_bg` is a
+background and rides as a flag.
+
+**`default` is a colour, and it is the idea the phase turns on.** Not black and
+not unset — the terminal's own foreground, rendering as no bytes at all. Three
+things are that one mechanism: a theme declining to repaint your prose, the
+theme a renderer holds before any config has been read, and the whole `NO_COLOR`
+tier. So a plain paragraph still costs zero escape bytes per row, and all
+twenty-one goldens written before this phase are byte-identical after it.
+
+**Every slot that carries meaning names what it degrades to** when there is no
+colour — `notice` and inline code to dim, the user's echoed words to bold. That
+is WCAG's "no meaning carried by colour alone" made mechanical, and it is
+checked twice: the existing goldens are all rendered at the `none` tier and must
+not move, and `theme-dark-none.txt` must be byte-identical to
+`theme-light-none.txt`, because at that tier a theme has nothing left to say.
+
+**Contrast is a test with a number, not a paragraph.** Every coloured slot in
+both built-ins clears 4.5:1 against its reference background and against
+`code_bg`, as written *and* after 256-colour quantization — the quantized check
+being the one that matters, since the colour an `ansi256` terminal paints is not
+the colour in the file. The tightest pair in the set is light `notice` on
+`code_bg` at 4.50:1, and `registry.zig` is what tells you if you move it.
+
+**The two built-ins differ only where they must.** Both leave `fg` and
+`assistant_block` to the terminal, so they are identical for the model's prose;
+they diverge on the six slots that have to be legible against a background of
+known lightness, and on `code_bg`, the one background tug paints and therefore
+the one place it has to know which way round the screen is. Both are
+`@embedFile`d and go through the same parser as any file a user writes, which is
+what makes "a hand-written theme loads by name" a property of the parser rather
+than a second code path. User themes live beside the config, in
+`~/.config/tug/themes/*.toml`; built-in names win, so editing `dark` means
+copying it to another name.
+
+**A theme's warnings are config notes**, and `DR-013`'s trigger was checked and
+did not fire. A theme file's problems turn out to be a config file's problems —
+a scanner refusal, an unknown key, a wrong type, a duplicate — plus `bad_color`,
+which fits the existing shape unchanged. Two kinds joined the enum and nothing
+else moved. `DR-007` restates the trigger as something sharper than "a third
+list": a warning list needing a field `Note` does not have.
+
+**`--theme <name>` is the first command-line flag that writes a config key**, so
+Phase 7's `flag` layer finally has something above the environment other than a
+unit test. `--debug-config` grows a third table — the resolved theme's slots —
+and prints its warnings after the config's and the keymap's, which makes it the
+only place a theme warning is visible until Phase 10, exactly where a keymap
+warning lives today. It also stopped returning early from the argument loop, so
+`--theme` written on either side of it survives.
+
+**`/theme` the command is Phase 10's; its mechanism is here.** `setTheme` swaps
+the theme and the next frame repaints the tail in it. Committed scrollback keeps
+the colours it was printed in, and `theme-switch.txt` shows that as bytes: tug
+does not move the cursor back over scrollback, so it cannot recolour it, so it
+does not pretend to.
+
+`scripts/theme-session.sh` drives six cases through a real pty and the real
+binary and asserts the bytes a theme's colours spell — a file-named theme, the
+other one so the first cannot pass by accident, `--theme` outranking the file, a
+hand-written theme found by name, an unknown theme falling back rather than
+failing, and `NO_COLOR` emitting no colour while keeping the attributes the
+colours were carrying.
+
+**Corrected while building it.** `isPlain` tested `@bitCast(style) == 0`, which
+stopped being the same question as "did that style emit anything" the moment a
+slot could be non-zero and still resolve to `default`. Every golden in the repo
+moved at once, all by the same four bytes — which is exactly the failure the
+byte-identical gate exists to produce, and it took one commit rather than
+twenty-one regenerated files to find.
+
+Cost: 8,608 bytes, taking the binary to 191,488 — 37 % of the 500 KiB budget.
+Tests go from 325 to 375.
+
 ### Not yet
 
-Themes and commands — Phases 9 to 11. `theme` is parsed and carried with its
-provenance and read by nobody yet. No command-line flag writes a config key, so
-the top layer of the layering is exercised only by a test. There is no unbind
-syntax, refused by name in `DR-013`. A keymap's warnings are visible through
-`--debug-config` and nowhere else — a shell that opened with four lines of
-scrollback about a keymap would be worse than one quietly using its defaults, so
-they wait for Phase 10's `/config`. And no terminal emulator has yet watched the
-renderer stream: the no-flicker eyeball test in kitty and alacritty is Phase 4's
-stated exit criterion and is still open.
+Commands — Phases 10 and 11. There is no `/theme`, no `/keys` and no `/config`:
+the data layers all exist and unit-test, and the registry that would expose them
+is Phase 10. Three warning lists are now visible through `--debug-config` and
+nowhere else, for the reason the first two were — a shell that opened with a
+screenful of scrollback about a colour would be worse than one quietly using its
+built-in. There is no unbind syntax, refused by name in `DR-013`. `error` is a
+theme slot nothing paints, because v0.1 has no error block. A user theme's
+contrast is not checked, because tug does not know what your background is; the
+built-ins' is, because somebody chose theirs. `code_bg` does not extend to the
+row edge (`DR-007`). And no terminal emulator has yet watched the renderer
+stream: the no-flicker eyeball test in kitty and alacritty is Phase 4's stated
+exit criterion and is still open.
 
 ### Toolchain
 
