@@ -227,7 +227,7 @@ the script pins the behaviour they cannot see.
 Cost: 15,992 bytes, taking the binary to 155,584 — 30 % of the 500 KiB budget.
 Tests go from 185 to 261.
 
-### Milestone 4 «It's yours» — Phases 7 and 8
+### Milestone 4 «It's yours» — Phases 7 to 10
 
 **Phase 7, config foundation.** Configuration layers: defaults, then
 `~/.config/tug/config.toml`, then `./.tug/config.toml`, then `TUG_*`, then
@@ -391,20 +391,86 @@ twenty-one regenerated files to find.
 Cost: 8,608 bytes, taking the binary to 191,488 — 37 % of the 500 KiB budget.
 Tests go from 325 to 375.
 
+**Phase 10, commands.** Typing `/help` into tug now does something. A line whose
+first non-space byte is `/` is routed to a command instead of a provider, and
+the five commands of v0.1 expose everything the four phases before them built:
+`/help` lists the registry, `/quit` leaves, `/config` prints the resolved
+settings with the layer that set each one, `/theme` lists the themes or switches
+the live one, and `/keys` prints the bindings that are actually in force.
+
+The registry is a table and `/help` reads it, so an unregistered command cannot
+appear in help — and a comptime check makes the converse true, so a command
+cannot be added to the enum and left off the screen that lists it. Names come
+from the enum's own tag names, so there is no second spelling to drift.
+
+A path is not a command. `/etc/hosts is wrong` is a sentence somebody meant to
+send, and a first token containing a slash of its own is submitted rather than
+routed — one `indexOfScalar`, and a whole class of eaten prompt gone (`DR-014`).
+A name that does not resolve gets the Phase-8 edit-distance suggestion:
+`/thme` answers "did you mean '/theme'?". A bare `/` points at `/help`, because
+there is no word for it to be close to.
+
+Tab is an action now, called `complete`, bound in the default table like every
+other chord — so somebody who wants completion on a different key rebinds it
+from a config file. It finishes a unique command name and leaves a trailing
+space for the argument; an ambiguous prefix completes to nothing rather than to
+a guess.
+
+Command output goes through the renderer as a `notice` block, not around it. A
+twenty-five-line `std.Io.Writer` adapter drains into `Renderer.feed`, so
+`Config.write`, `Keymap.write` and `Theme.write` — built in Phases 7, 8 and 9 —
+are reused verbatim and `/config` and `--debug-config` cannot disagree about
+what tug read. Its buffer batches rather than bounds: an 11 KiB `/keys` table
+streams through a 1 KiB caller buffer. An allocator failure inside `feed` is
+stashed and re-raised, because `error{WriteFailed}` cannot carry it and a
+machine out of memory should not be told its terminal is broken.
+
+**Three warning lists finally have a screen.** Since Phase 7 the config's
+warnings, the keymap's and the theme's have been visible through
+`--debug-config` and nowhere else, which meant a person who mistyped a chord saw
+their binding not work and got no explanation. `/config` now renders all three,
+in one list with one shape and one left edge — and a shell that has something to
+warn about says so once at startup: `2 warnings in your configuration - run
+/config to see them`. One row of scrollback for the people with a problem,
+nothing for the people without. `DR-014` records why the alternative — printing
+all three lists on every startup — is the warning people learn to scroll past.
+
+**The `/demo` probe.** The roadmap's "a new slash command requires zero
+renderer/loop changes" was executed rather than asserted: a throwaway `/demo`
+command was added, its diff measured, and it was removed again. Two source
+files, three insertions, one deletion — one row in the registry and one arm in
+the handler switch. Nothing under `render/`, nothing under `loop/`, and neither
+`--help` nor `/keys` needed editing to know about it.
+
+`scripts/command-session.sh` runs seven cases through a pty against the real
+binary: the registry listed, a near miss suggested, a path submitted rather than
+routed, tab completing before the line runs, a theme switched mid-session, all
+three warning lists on `/config` with the startup line counting them, and a
+clean config opening silently. Watched to fail with the tab dropped from the
+completion case.
+
+Cost: 5,032 bytes, taking the binary to 196,520 — 38 % of the 500 KiB budget.
+Tests go from 375 to 411.
+
 ### Not yet
 
-Commands — Phases 10 and 11. There is no `/theme`, no `/keys` and no `/config`:
-the data layers all exist and unit-test, and the registry that would expose them
-is Phase 10. Three warning lists are now visible through `--debug-config` and
-nowhere else, for the reason the first two were — a shell that opened with a
-screenful of scrollback about a colour would be worse than one quietly using its
-built-in. There is no unbind syntax, refused by name in `DR-013`. `error` is a
-theme slot nothing paints, because v0.1 has no error block. A user theme's
-contrast is not checked, because tug does not know what your background is; the
-built-ins' is, because somebody chose theirs. `code_bg` does not extend to the
-row edge (`DR-007`). And no terminal emulator has yet watched the renderer
-stream: the no-flicker eyeball test in kitty and alacritty is Phase 4's stated
-exit criterion and is still open.
+Hardening — Phase 11. `/theme` with no argument lists the built-ins and the live
+theme, not the themes directory: reading it needs `std.Io.Dir` iteration, which
+nothing in tug does yet. Completion refuses an ambiguous prefix instead of
+completing to the longest common one, because no two of the five names collide
+and the code would have no input. A command goes into the shared prompt history,
+which is the scope guard's "no command history separate from input history" and
+means a history file now holds lines nobody would want sent to a provider.
+Switching a theme does not repaint committed scrollback, which is the
+append-only rule rather than a limitation with an apology attached.
+
+There is no unbind syntax, refused by name in `DR-013`. `error` is a theme slot
+nothing paints, because v0.1 has no error block. A user theme's contrast is not
+checked, because tug does not know what your background is; the built-ins' is,
+because somebody chose theirs. `code_bg` does not extend to the row edge
+(`DR-007`). And no terminal emulator has yet watched the renderer stream: the
+no-flicker eyeball test in kitty and alacritty is Phase 4's stated exit
+criterion and is still open.
 
 ### Toolchain
 
