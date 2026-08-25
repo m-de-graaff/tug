@@ -29,8 +29,10 @@ const proto = @import("tugproto");
 
 const actions = @import("edit/actions.zig");
 const backend = @import("term/backend.zig");
+const block_writer = @import("render/block_writer.zig");
 const cadence_mod = @import("provider/cadence.zig");
 const caps_mod = @import("term/caps.zig");
+const command = @import("command.zig");
 const config_mod = @import("config/load.zig");
 const decoder_mod = @import("input/decoder.zig");
 const editor_mod = @import("edit/editor.zig");
@@ -43,9 +45,11 @@ const modes = @import("term/modes.zig");
 const probe_mod = @import("term/probe.zig");
 const queue_mod = @import("loop/queue.zig");
 const renderer_mod = @import("render/renderer.zig");
+const transcript = @import("render/transcript.zig");
 const runner_mod = @import("provider/runner.zig");
 const waiting = @import("loop/wait.zig");
 
+const Counting = @import("render/counting_writer.zig").Counting;
 const Editor = editor_mod.Editor;
 const History = history_mod.History;
 const KeyEvent = key_mod.KeyEvent;
@@ -71,6 +75,23 @@ pub const Session = struct {
     queue: *queue_mod.Queue,
     waker: *waiting.Waker,
     bus: *core.Bus,
+
+    /// For `/theme`, which resolves a theme file at runtime. The only
+    /// allocation this session makes on its own.
+    gpa: std.mem.Allocator,
+
+    /// The resolved settings, for `/config`. Borrowed from `run`'s frame; a
+    /// config is read once and never re-read, which is why a borrow is enough.
+    config: *const core.config.Config,
+    /// Indexed by layer, exactly as `Config.writeNotes` takes it.
+    origins: [5][]const u8,
+    /// The live theme and the bytes its warnings borrow. A pointer to the
+    /// frame's, not a copy, because `/theme` replaces it and the frame's
+    /// `defer` is what frees whichever one is live at the end.
+    theme: *theme_mod.Loaded,
+    /// Where user themes live, or null when nothing in the environment names a
+    /// directory.
+    theme_dir: ?[]const u8 = null,
 
     /// Decides what every chord means, including which one is `newline`
     /// (`DR-003`). Resolved from the default table and every config layer;
@@ -218,7 +239,7 @@ pub const Session = struct {
             .quit => self.quitting = true,
             .end_of_input => try self.endOfInput(),
             .clear_screen => try self.renderer.clearScreen(self.screen),
-            .complete => {},
+            .complete => try self.completeCommand(),
             .history_prev => try self.recall(.previous),
             .history_next => try self.recall(.next),
         }
@@ -282,6 +303,27 @@ pub const Session = struct {
         try self.renderer.feed(text);
         try self.renderer.feed("\n");
         try self.renderer.endBlock();
+
+        // A command is answered here and never published. Nothing outside this
+        // shell asked for it, and a provider handed `/quit` would be a provider
+        // asked a question about a terminal it is not running in.
+        //
+        // `text` borrows the editor, so the command runs before the clear.
+        switch (command.parse(text)) {
+            .run => |found| {
+                try self.runCommand(found.id, found.rest);
+                self.editor.clear();
+                self.quit_armed = false;
+                return;
+            },
+            .unknown => |missed| {
+                try self.unknownCommand(missed.word, missed.suggestion);
+                self.editor.clear();
+                self.quit_armed = false;
+                return;
+            },
+            .prompt => {},
+        }
 
         self.bus.publish(.{ .input_submit = .{ .text = text } });
 
@@ -375,6 +417,157 @@ pub const Session = struct {
         try self.renderer.feed(message);
         try self.renderer.feed("\n");
         try self.renderer.endBlock();
+    }
+
+    // --- commands ----------------------------------------------------------
+
+    /// Tab: finish the command name at the head of the draft.
+    ///
+    /// First token only. Argument completion is out of v0.1's scope, and a tab
+    /// anywhere else does what it did before this phase, which is nothing.
+    fn completeCommand(self: *Session) !void {
+        const text = self.editor.items();
+        if (text.len < 2 or text[0] != '/') return;
+        if (std.mem.indexOfAny(u8, text, " \t\n") != null) return;
+
+        const full = command.complete(text[1..]) orelse return;
+
+        // The trailing space is the point of completing a name: `/theme` takes
+        // an argument, and a cursor parked against the `e` would have to be
+        // moved before one could be typed.
+        var buffer: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buffer, "/{s} ", .{full}) catch return;
+        try self.editor.setText(line);
+        self.afterEdit();
+    }
+
+    /// Runs one command. The only place in this file that mentions a
+    /// `command.Id`, which is what makes "a new command is a table row and a
+    /// switch arm" a fact about this file rather than a hope.
+    fn runCommand(self: *Session, id: command.Id, rest: []const u8) !void {
+        // The one command with nothing to print. Everything below opens a
+        // block, and a block with nothing in it is a blank row in scrollback.
+        if (id == .quit) {
+            self.quitting = true;
+            return;
+        }
+
+        try self.renderer.beginBlock(.notice);
+        // A batching buffer, not a limit: `BlockWriter` drains when it fills,
+        // so a `/keys` table with 160 bindings streams through this same 1 KiB.
+        var buffer: [1024]u8 = undefined;
+        var block: block_writer.BlockWriter = .init(self.renderer, &buffer);
+        const out = &block.writer;
+
+        switch (id) {
+            .quit => unreachable,
+            .help => try command.writeHelp(out),
+            .config => {
+                try self.config.write(out);
+                try self.writeWarnings(out);
+            },
+            .keys => try self.keymap.write(out),
+            .theme => try self.switchTheme(out, rest),
+        }
+
+        try block.finish();
+        try self.renderer.endBlock();
+    }
+
+    /// `/theme` with a name switches; without one, it lists.
+    ///
+    /// ponytail: the list is the built-ins plus the live theme when it is
+    /// neither. Reading the themes directory would need `std.Io.Dir` iteration,
+    /// which nothing in tug does yet and which would put a readdir on a path
+    /// that has no IO at all today. Add it when somebody has more than one file
+    /// in there and cannot remember what they called them.
+    fn switchTheme(self: *Session, out: *std.Io.Writer, name: []const u8) !void {
+        if (name.len == 0) {
+            const live = self.config.theme.value;
+            try out.writeAll("theme                where\n");
+            var listed = false;
+            for (theme_mod.builtin_names) |builtin_name| {
+                const is_live = std.mem.eql(u8, builtin_name, live);
+                if (is_live) listed = true;
+                try writeThemeRow(out, builtin_name, "built-in", is_live);
+            }
+            if (!listed) try writeThemeRow(out, live, self.theme.origin, true);
+            return;
+        }
+
+        // `.flag` because a command outranks every file, which is what the top
+        // layer means. It reaches nothing but the note's own layer field, which
+        // a theme's `writeNotes` does not read — a theme is one file, not a
+        // stack — so it is a label rather than a decision.
+        const loaded = theme_mod.resolve(self.gpa, self.io, name, self.theme_dir, .flag);
+
+        // The `Theme` is values and not slices (`core.theme`), so the bytes the
+        // old one was parsed from are free the moment the renderer holds the
+        // new colours.
+        self.renderer.setTheme(loaded.result.theme);
+        self.theme.deinit(self.gpa);
+        self.theme.* = loaded;
+
+        try out.print("theme: {s}\n", .{name});
+        try self.theme.result.writeNotes(out, self.theme.origin);
+    }
+
+    fn writeThemeRow(
+        out: *std.Io.Writer,
+        name: []const u8,
+        where: []const u8,
+        live: bool,
+    ) std.Io.Writer.Error!void {
+        try out.writeAll("  ");
+        try out.writeAll(name);
+        var index = name.len + 2;
+        while (index < 20) : (index += 1) try out.writeAll(" ");
+        try out.writeAll(" ");
+        try out.writeAll(where);
+        if (live) try out.writeAll("  (live)");
+        try out.writeAll("\n");
+    }
+
+    fn unknownCommand(self: *Session, word: []const u8, suggestion: []const u8) !void {
+        try self.renderer.beginBlock(.notice);
+        var buffer: [256]u8 = undefined;
+        var block: block_writer.BlockWriter = .init(self.renderer, &buffer);
+        const out = &block.writer;
+
+        if (word.len == 0) {
+            // A bare slash. There is no word to be close to, so the sentence
+            // points at the screen that lists them.
+            try out.writeAll("type /help for the commands\n");
+        } else {
+            try out.print("no such command ('/{s}')", .{word});
+            if (suggestion.len > 0) try out.print("; did you mean '/{s}'?", .{suggestion});
+            try out.writeAll("\n");
+        }
+
+        try block.finish();
+        try self.renderer.endBlock();
+    }
+
+    /// The three warning lists, in the order `--debug-config` prints them.
+    ///
+    /// One screen, one list, one shape — which is the rule `DR-013` set when
+    /// there were two of these and `DR-007` re-checked when there were three.
+    fn writeWarnings(self: *const Session, out: *std.Io.Writer) !void {
+        if (!self.hasWarnings()) return;
+        try out.writeAll("\n");
+        try self.config.writeNotes(out, self.origins);
+        try self.keymap.writeProblems(out, self.origins);
+        try self.theme.result.writeNotes(out, self.theme.origin);
+    }
+
+    pub fn warningCount(self: *const Session) usize {
+        return self.config.notes().len +
+            self.keymap.problems().len +
+            self.theme.result.notes().len;
+    }
+
+    pub fn hasWarnings(self: *const Session) bool {
+        return self.warningCount() > 0;
     }
 };
 
@@ -471,11 +664,8 @@ pub fn run(
     // depend on the terminal — only the tier it is painted at does, and the
     // renderer reads that from `caps` at the moment it writes each escape.
     //
-    // Its warnings are not printed, for the reason the keymap's are not: there
-    // is nowhere to put them until Phase 10's `/config` renders a notice block,
-    // and a shell that opened with three lines of scrollback about a colour
-    // would be worse than one quietly using the built-in. `--debug-config` is
-    // where they are visible today.
+    // Its warnings reach the screen through `/config`, along with the config's
+    // and the keymap's � one list, one shape, one place to look (`DR-014`).
     var theme = theme_mod.resolve(
         gpa,
         io,
@@ -501,11 +691,8 @@ pub fn run(
     // answer, and after the config load, because that is where the rebinds come
     // from. The frame owns it; the session borrows it for the life of the loop.
     //
-    // Its warnings are not printed. There is nowhere to put them until Phase
-    // 10's `/config` renders a notice block, and a shell that opens with four
-    // lines of scrollback about a keymap would be worse than one that is
-    // quietly using the defaults. `--debug-config` is where they are visible
-    // today.
+    // Its warnings reach the screen through `/config` (`DR-014`), and the line
+    // below the loop's first paint says how many there are to go and look at.
     var keymap: keymap_mod.Keymap = .build(&loaded.config, detected.kitty_keyboard);
 
     // Anything typed while the terminal was deciding whether to answer. On a
@@ -524,6 +711,7 @@ pub fn run(
 
     var session: Session = .{
         .io = io,
+        .gpa = gpa,
         .terminal = &terminal,
         .screen = screen,
         .renderer = &renderer,
@@ -533,6 +721,10 @@ pub fn run(
         .waker = &waker,
         .bus = &bus,
         .keymap = &keymap,
+        .config = &loaded.config,
+        .origins = loaded.origins,
+        .theme = &theme,
+        .theme_dir = setup.theme_dir,
         .provider = setup.provider,
     };
     try bus.subscribe(.{ .context = &session, .handler = Session.onEvent });
@@ -577,10 +769,21 @@ const Harness = struct {
     editor: Editor,
     history: History,
     /// A value rather than a local, so a test can rebind it after `init` and
-    /// the session — which holds a pointer to this field — sees the change.
+    /// the session � which holds a pointer to this field � sees the change.
     keymap: keymap_mod.Keymap = undefined,
+    /// Same reason: `/config` reads this, and a test sets it up first.
+    config: core.config.Config = .{},
+    loaded_theme: theme_mod.Loaded = undefined,
     bus: core.Bus = .{},
     session: Session = undefined,
+
+    const origins: [5][]const u8 = .{
+        "<defaults>",
+        "<none>",
+        ".tug/config.toml",
+        "<environment>",
+        "<flags>",
+    };
 
     fn init(self: *Harness) void {
         const caps: renderer_mod.Capabilities = .{
@@ -588,15 +791,18 @@ const Harness = struct {
             .kitty_keyboard = true,
             .synchronized_output = false,
             .bracketed_paste = true,
-            .size = .{ .cols = 40, .rows = 12 },
+            .size = .{ .cols = 72, .rows = 200 },
         };
         self.renderer = .init(testing.allocator, caps, caps.size);
         self.editor = .init(testing.allocator);
         self.history = .init(testing.allocator, undefined, null);
         self.keymap = .defaults(true);
+        self.config = .{};
+        self.loaded_theme = theme_mod.resolve(testing.allocator, testing.io, "dark", null, .default);
         self.bus = .{};
         self.session = .{
-            .io = undefined,
+            .io = testing.io,
+            .gpa = testing.allocator,
             .terminal = undefined,
             .screen = undefined,
             .renderer = &self.renderer,
@@ -606,11 +812,16 @@ const Harness = struct {
             .waker = undefined,
             .bus = &self.bus,
             .keymap = &self.keymap,
+            .config = &self.config,
+            .origins = origins,
+            .theme = &self.loaded_theme,
+            .theme_dir = null,
             .provider = null,
         };
     }
 
     fn deinit(self: *Harness) void {
+        self.loaded_theme.deinit(testing.allocator);
         self.history.deinit();
         self.editor.deinit();
         self.renderer.deinit();
@@ -622,6 +833,26 @@ const Harness = struct {
 
     fn typeText(self: *Harness, text: []const u8) !void {
         for (text) |byte| try self.press(.{ .key = .{ .char = byte } });
+    }
+
+    /// Whether one paint contains every one of `needles`.
+    ///
+    /// A command's output is a notice block, so the only place to look for it
+    /// is the frame � which is also the assertion that it went through the
+    /// renderer rather than around it.
+    ///
+    /// **Call this once per test.** Painting commits rows to scrollback, so a
+    /// second call looks at a frame the first one emptied. Pass every needle to
+    /// one call rather than making one call per needle.
+    fn painted(self: *Harness, needles: []const []const u8) bool {
+        var buffer: [128 * 1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        _ = self.renderer.paint(&writer) catch return false;
+        const frame = writer.buffered();
+        for (needles) |needle| {
+            if (std.mem.indexOf(u8, frame, needle) == null) return false;
+        }
+        return true;
     }
 };
 
@@ -899,4 +1130,223 @@ test "a leftover delta from an interrupted turn is dropped" {
         @as(?usize, null),
         std.mem.indexOf(u8, writer.buffered(), "late"),
     );
+}
+
+// --- commands ---------------------------------------------------------------
+
+test "a command is answered here and never reaches the bus" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    var seen: usize = 0;
+    try harness.bus.subscribe(.{ .context = &seen, .handler = countSubmits });
+
+    try harness.typeText("/help");
+    try harness.press(.{ .key = .enter });
+
+    // In history and echoed like anything else the user typed...
+    try testing.expectEqual(@as(usize, 1), harness.history.count());
+    try testing.expectEqualStrings("", harness.editor.items());
+    // ...and not published, because nothing outside this shell asked for it.
+    try testing.expectEqual(@as(usize, 0), seen);
+}
+
+fn countSubmits(context: ?*anyopaque, payload: proto.Payload) void {
+    const seen: *usize = @ptrCast(@alignCast(context.?));
+    if (payload == .input_submit) seen.* += 1;
+}
+
+test "a prompt still reaches the bus" {
+    // The other half of the claim above: the router did not swallow everything.
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    var seen: usize = 0;
+    try harness.bus.subscribe(.{ .context = &seen, .handler = countSubmits });
+
+    try harness.typeText("what is a tugboat");
+    try harness.press(.{ .key = .enter });
+    try testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "a line that starts with a path is a prompt, not a command" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    var seen: usize = 0;
+    try harness.bus.subscribe(.{ .context = &seen, .handler = countSubmits });
+
+    try harness.typeText("/etc/hosts is wrong");
+    try harness.press(.{ .key = .enter });
+    try testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "/quit leaves" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("/quit");
+    try harness.press(.{ .key = .enter });
+    try testing.expect(harness.session.quitting);
+}
+
+test "an unknown command suggests the near miss and does not quit" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("/thme");
+    try harness.press(.{ .key = .enter });
+    try testing.expect(!harness.session.quitting);
+    try testing.expect(harness.painted(&.{ "no such command", "thme", "theme" }));
+}
+
+test "a bare slash points at help rather than suggesting nothing" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("/");
+    try harness.press(.{ .key = .enter });
+    try testing.expect(harness.painted(&.{"/help"}));
+}
+
+test "/theme switches the live theme and says which one" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try testing.expectEqualStrings("<built-in dark>", harness.loaded_theme.origin);
+    try harness.typeText("/theme light");
+    try harness.press(.{ .key = .enter });
+
+    try testing.expectEqualStrings("<built-in light>", harness.loaded_theme.origin);
+    // The renderer holds the new colours, not just the registry.
+    try testing.expectEqual(
+        harness.loaded_theme.result.theme.color(.user_block),
+        harness.renderer.theme.color(.user_block),
+    );
+}
+
+test "/theme with an unknown name warns and keeps the shell open" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("/theme nope");
+    try harness.press(.{ .key = .enter });
+    try testing.expect(!harness.session.quitting);
+    try testing.expect(harness.painted(&.{ "no such theme", "nope" }));
+    // Fell back to the dark built-in rather than to nothing.
+    try testing.expectEqualStrings("<built-in dark>", harness.loaded_theme.origin);
+}
+
+test "/theme with no argument lists what there is and marks the live one" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("/theme");
+    try harness.press(.{ .key = .enter });
+    try testing.expect(harness.painted(&.{ "dark", "light", "(live)" }));
+}
+
+test "/config prints the provenance column and every warning list" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    // One warning of each kind, so the assertion is about all three lists
+    // rather than about whichever one happens to be first.
+    harness.config.apply(.project, "theme = \"nope\"\nnosuch = 1\n[keys]\n\"ctrl+@@\" = \"newline\"\n");
+    harness.keymap = .build(&harness.config, true);
+    // The theme's own list. `init` resolved `dark`; this is what `run` would
+    // have resolved from the config above, which is the theme whose name is
+    // wrong.
+    harness.loaded_theme.deinit(testing.allocator);
+    harness.loaded_theme = theme_mod.resolve(
+        testing.allocator,
+        testing.io,
+        harness.config.theme.value,
+        null,
+        harness.config.theme.source,
+    );
+
+    try harness.typeText("/config");
+    try harness.press(.{ .key = .enter });
+
+    // One call, not three: the renderer is append-only, so the first paint
+    // commits these rows to scrollback and a second would look at a frame that
+    // no longer holds them.
+    try testing.expect(harness.painted(&.{
+        "setting",
+        "theme",
+        "project",
+        "no such setting",
+        "not a key chord",
+        "no such theme",
+    }));
+}
+
+test "/keys prints the live bindings, including a rebind" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    harness.config.apply(.project, "[keys]\n\"ctrl+j\" = \"newline\"\n");
+    harness.keymap = .build(&harness.config, true);
+
+    try harness.typeText("/keys");
+    try harness.press(.{ .key = .enter });
+
+    try testing.expect(harness.painted(&.{ "chord", "action", "ctrl+j", "newline", "project" }));
+}
+
+test "tab completes a command name and leaves room for its argument" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("/the");
+    try harness.press(.{ .key = .tab });
+    try testing.expectEqualStrings("/theme ", harness.editor.items());
+    try testing.expectEqual(@as(usize, 7), harness.editor.cursor);
+}
+
+test "tab does nothing to a draft that is not a command" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try harness.typeText("hello");
+    try harness.press(.{ .key = .tab });
+    try testing.expectEqualStrings("hello", harness.editor.items());
+
+    // Past the first token is out of scope: no argument completion in v0.1.
+    harness.editor.clear();
+    try harness.typeText("/theme li");
+    try harness.press(.{ .key = .tab });
+    try testing.expectEqualStrings("/theme li", harness.editor.items());
+
+    // An ambiguous prefix completes to nothing rather than to a guess.
+    harness.editor.clear();
+    try harness.typeText("/");
+    try harness.press(.{ .key = .tab });
+    try testing.expectEqualStrings("/", harness.editor.items());
+}
+
+test "a command mid-stream is ignored, like every other chord that is not an interrupt" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    harness.session.state = .streaming;
+    try harness.session.applyAction(.complete);
+    try harness.session.applyAction(.submit);
+    harness.session.state = .idle;
+    try testing.expect(!harness.session.quitting);
 }
