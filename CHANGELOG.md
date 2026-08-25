@@ -227,7 +227,7 @@ the script pins the behaviour they cannot see.
 Cost: 15,992 bytes, taking the binary to 155,584 — 30 % of the 500 KiB budget.
 Tests go from 185 to 261.
 
-### Milestone 4 «It's yours» — Phase 7
+### Milestone 4 «It's yours» — Phases 7 and 8
 
 **Phase 7, config foundation.** Configuration layers: defaults, then
 `~/.config/tug/config.toml`, then `./.tug/config.toml`, then `TUG_*`, then
@@ -267,14 +267,63 @@ Cost: 17,504 bytes, taking the binary to 173,088 — 33 % of the 500 KiB budget,
 and 34 % of `DR-006`'s own 50 KiB bar for the whole config stack. Tests go from
 261 to 296.
 
+**Phase 8, actions and keymaps.** `"ctrl+j" = "newline"` in a config file now
+rebinds the shell. A chord parses back into the `KeyEvent` that spells it —
+`parseChord` is the exact inverse of the `writeChord` that has been on
+`KeyEvent` since Phase 2, and the property test crosses every key the decoder
+can produce with all sixteen modifier combinations. Modifiers are accepted in
+any order; `space` has a name because `" " = "submit"` is a legal TOML key that
+nobody can see in a diff.
+
+**Four resolution rules, and `DR-013` argues each** (`src/shell/input/keymap.zig`).
+A config chord that lands on a default replaces it *silently*, because
+overriding a default is the feature and a warning that fires for everyone who
+customised anything hides the one that matters. A config chord that lands on
+another config chord is a conflict: the warning names both actions and both
+layers, and the later entry wins — which, since Phase 7 collects bindings in
+layer order rather than merging them, is the same sentence as the higher layer
+winning. An unparseable chord and an unknown action each cost exactly one
+binding; the unknown action gets a nearest-match suggestion, thresholded so that
+nothing close enough means nothing suggested.
+
+**The keymap's warnings are not config notes.** `tugcore` has no `KeyEvent` and
+cannot acquire one while it still compiles for `wasm32-freestanding`, so a note
+kind only `tugshell` can produce would sit in the module that cannot evaluate
+it — and a conflict names two actions and two layers where a `Note` has one of
+each. The cost is two adjacent warning lists in one format, and `DR-013` records
+a third list as the trigger to reconsider.
+
+**`quit` is a new action and ships with no chord.** `end_of_input` quits on an
+empty draft and deletes forward otherwise, which is ctrl+d's bash behaviour and
+not what somebody binding `"f10" = "quit"` means. Adding it was also the phase's
+exit-criterion probe, executed rather than asserted: two files, no renderer, no
+loop, no decoder, twelve lines for the action itself. `/keys` lists unbound
+actions so an action with no chord stays discoverable.
+
+`actions.defaultAction` is deleted. Two lookups over the same table agree right
+up until somebody edits one, and the resolved keymap is what dispatch asks. The
+editor goldens route through a default `Keymap` and still match byte for byte,
+which is the check that the seed is the table that was there before.
+
+`--debug-config` grows a second half: the live keymap grouped by category, each
+row naming the layer that set it, then both warning lists. It resolves with the
+kitty protocol off, because no terminal has been opened — the honest answer for
+a flag reporting what was read rather than what is live in a window.
+
+Cost: 9,792 bytes, taking the binary to 182,880 — 35 % of the 500 KiB budget.
+Tests go from 296 to 325.
+
 ### Not yet
 
-Keymaps, themes and commands — Phases 8 to 11. `theme` and `[keys]` are parsed
-and carried with their provenance and read by nobody yet. No command-line flag
-writes a config key, so the top layer of the layering is exercised only by a
-test. And no terminal emulator has yet watched the renderer stream: the
-no-flicker eyeball test in kitty and alacritty is Phase 4's stated exit
-criterion and is still open.
+Themes and commands — Phases 9 to 11. `theme` is parsed and carried with its
+provenance and read by nobody yet. No command-line flag writes a config key, so
+the top layer of the layering is exercised only by a test. There is no unbind
+syntax, refused by name in `DR-013`. A keymap's warnings are visible through
+`--debug-config` and nowhere else — a shell that opened with four lines of
+scrollback about a keymap would be worse than one quietly using its defaults, so
+they wait for Phase 10's `/config`. And no terminal emulator has yet watched the
+renderer stream: the no-flicker eyeball test in kitty and alacritty is Phase 4's
+stated exit criterion and is still open.
 
 ### Toolchain
 

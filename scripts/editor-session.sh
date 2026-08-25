@@ -219,4 +219,32 @@ grep -q 'still alive' "$capture" ||
     fail "a keymap with two bad entries stopped the shell from opening"
 echo "editor-session: a keymap typo warns and the shell still opens"
 
+# --- an action with no default chord, given one --------------------------
+#
+# `quit` ships unbound: every obvious chord for it is taken or unsafe. That
+# makes it the action nothing would otherwise press, so this is the one place
+# it runs. ctrl+g is 0x07 and unbound by default (src/shell/input/decoder.zig).
+#
+# The draft is left non-empty on purpose. ctrl+d on a non-empty draft deletes
+# forward and ctrl+c clears it, so a session that ends here can only have ended
+# because `quit` fired — and the history must not grow, because leaving is not
+# submitting.
+
+cat >"$config/tug/config.toml" <<'TOML'
+[keys]
+"ctrl+g" = "quit"
+TOML
+
+before=$(wc -l <"$history_file" | tr -d ' ')
+extra_env="XDG_CONFIG_HOME=$config"
+drive "sleep 1; printf 'never sent'; sleep 1; printf '\007'"
+after=$(wc -l <"$history_file" | tr -d ' ')
+
+grep -q 'never sent' "$capture" ||
+    fail "the draft never reached the editor in the quit run"
+if [ "$before" != "$after" ]; then
+    fail "quit submitted the draft instead of leaving: $before -> $after"
+fi
+echo "editor-session: a bound quit ends the session without submitting"
+
 echo "editor-session: the editor behaves"
