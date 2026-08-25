@@ -93,6 +93,10 @@ pub const Sources = struct {
     user_path: ?[]const u8 = null,
     project_path: []const u8 = default_project_path,
     env: [core.config.env_keys.len]?[]const u8 = @splat(null),
+    /// `--theme <name>`, and the first value any command-line flag writes into
+    /// the config. The `flag` layer has existed since Phase 7 with nothing but
+    /// a unit test above the environment; this is what puts something there.
+    theme_flag: ?[]const u8 = null,
 
     const default_project_path = project_path;
 };
@@ -138,6 +142,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, sources: Sources) Loaded {
     for (core.config.env_keys, sources.env) |entry, value| {
         if (value) |text| loaded.config.setScalar(.env, entry.key, text);
     }
+
+    if (sources.theme_flag) |name| loaded.config.setScalar(.flag, "theme", name);
 
     return loaded;
 }
@@ -251,6 +257,29 @@ fn tmpPath(
     name: []const u8,
 ) ![]u8 {
     return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ &tmp.sub_path, name });
+}
+
+test "the flag layer sits above the environment" {
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init_single_threaded;
+
+    var env: [core.config.env_keys.len]?[]const u8 = @splat(null);
+    for (core.config.env_keys, 0..) |entry, index| {
+        if (std.mem.eql(u8, entry.variable, "TUG_THEME")) env[index] = "from-env";
+    }
+
+    var loaded = load(gpa, threaded.io(), .{
+        .user_path = null,
+        .project_path = "definitely/not/here.toml",
+        .env = env,
+        .theme_flag = "from-flag",
+    });
+    defer loaded.deinit(gpa);
+
+    // Closes the Phase 7 carry-forward: until now the top of the layering was
+    // exercised only by a unit test on `setScalar`, because nothing wrote to it.
+    try testing.expectEqualStrings("from-flag", loaded.config.theme.value);
+    try testing.expectEqual(core.config.Layer.flag, loaded.config.theme.source);
 }
 
 test "the project layer beats the user layer, and both are read" {

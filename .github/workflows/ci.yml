@@ -152,12 +152,39 @@ jobs:
       - run: zig build
       - run: sh scripts/editor-session.sh zig-out/bin/tug
 
+  theme-session:
+    name: themes reach the terminal
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The six goldens pin what the encoder emits and `--debug-config` pins
+      # what the loader resolved. Neither can say whether the theme reaches the
+      # renderer of a running shell, because only `repl.run` wires them together
+      # and only a pty runs it.
+      - run: zig build
+      - run: sh scripts/theme-session.sh zig-out/bin/tug
+
   # --- the meta-gate ------------------------------------------------------
 
   wall-clock:
     name: ci under 5 min
     runs-on: ubuntu-24.04
-    needs: [fmt, no-network, test, wasm, size, version-latency, windows-compile, mock-modes, editor-session]
+    needs:
+      [
+        fmt,
+        no-network,
+        test,
+        wasm,
+        size,
+        version-latency,
+        windows-compile,
+        mock-modes,
+        editor-session,
+        theme-session,
+      ]
     if: always()
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

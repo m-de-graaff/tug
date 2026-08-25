@@ -241,8 +241,11 @@ pub const Theme = struct {
         value: Color,
     ) std.Io.Writer.Error!void {
         try out.writeAll(name);
+        // `slot_column - 1` and then one unconditional space, which is what
+        // `Config.pad` does and why the three tables share a left edge even
+        // when a name is wider than its column.
         var index = name.len;
-        while (index < slot_column) : (index += 1) try out.writeAll(" ");
+        while (index < slot_column - 1) : (index += 1) try out.writeAll(" ");
         try out.writeAll(" ");
         switch (value) {
             .default => try out.writeAll("default"),

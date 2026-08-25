@@ -60,6 +60,9 @@ const usage =
     \\  --mock-fault F     none | stall[=ms] | midstream_error | oversized_chunk
     \\                     | split_utf8 | instant | firehose | empty
     \\
+    \\appearance:
+    \\  --theme NAME       Use a named theme. Built in: dark, light.
+    \\
     \\debugging:
     \\  --caps             Print detected terminal capabilities and exit.
     \\  --debug-keys       Echo decoded key events until ctrl+c.
@@ -82,6 +85,9 @@ const Options = struct {
     once: bool = false,
     mock: core.mock.Config = .{},
     cadence: shell.cadence.Preset = .normal,
+    /// `--theme <name>`, applied at the `flag` layer by the config load.
+    /// Borrowed from `argv`, which outlives every use of it.
+    theme: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -121,7 +127,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         },
         .debug_keys => return debugKeys(io, stdout, init.environ, environment_allocator.allocator()),
         .debug_config => {
-            try printConfig(io, stdout, init.environ, environment_allocator.allocator());
+            try printConfig(
+                io,
+                stdout,
+                init.environ,
+                environment_allocator.allocator(),
+                options,
+            );
             return stdout.flush();
         },
         .mock => return runMock(
@@ -143,6 +155,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 environment.config,
                 builtin.os.tag == .windows,
             );
+            const themes_dir = try shell.config.themesDir(
+                environment_allocator.allocator(),
+                environment.config,
+                builtin.os.tag == .windows,
+            );
             return shell.repl.run(
                 // The shell is the first thing in tug that lives longer than a
                 // turn, and the editor, the history and the renderer all
@@ -159,9 +176,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                         .none => null,
                         .mock => .{ .mock = options.mock, .cadence = options.cadence },
                     },
+                    .theme_dir = themes_dir,
                     .config = .{
                         .user_path = config_path,
                         .env = environment.config_env,
+                        .theme_flag = options.theme,
                     },
                 },
             );
@@ -187,7 +206,13 @@ fn parseArgs(argv: []const [:0]const u8) Options {
         if (eqlAny(arg, &.{ "--help", "-h" })) return .{ .command = .help };
         if (eqlAny(arg, &.{"--caps"})) return .{ .command = .caps };
         if (eqlAny(arg, &.{"--debug-keys"})) return .{ .command = .debug_keys };
-        if (eqlAny(arg, &.{"--debug-config"})) return .{ .command = .debug_config };
+        // Set rather than returned, unlike the four above it: this is the one
+        // command that reads the config, so `--theme` has to survive being
+        // written on either side of it.
+        if (eqlAny(arg, &.{"--debug-config"})) {
+            options.command = .debug_config;
+            continue;
+        }
 
         if (eqlAny(arg, &.{"--once"})) {
             options.once = true;
@@ -206,6 +231,11 @@ fn parseArgs(argv: []const [:0]const u8) Options {
                 parseFault(text, &options.mock);
                 index += 1;
             }
+        } else if (eqlAny(arg, &.{"--theme"})) {
+            if (value) |name| {
+                options.theme = name;
+                index += 1;
+            }
         } else if (eqlAny(arg, &.{"--mock-cadence"})) {
             if (value) |text| {
                 requested_cadence = shell.cadence.Preset.parse(text) orelse requested_cadence;
@@ -216,8 +246,11 @@ fn parseArgs(argv: []const [:0]const u8) Options {
 
     options.cadence = shell.cadence.presetFor(options.mock.fault, requested_cadence);
     // Decided last, because `--once` and `--provider` can arrive in either
-    // order and neither means anything without the other.
-    if (options.provider == .mock and options.once) options.command = .mock;
+    // order and neither means anything without the other. Only from `shell`:
+    // `--debug-config` has already spoken and it outranks a provider.
+    if (options.command == .shell and options.provider == .mock and options.once) {
+        options.command = .mock;
+    }
     return options;
 }
 
@@ -341,6 +374,7 @@ fn printConfig(
     out: *std.Io.Writer,
     environ: std.process.Environ,
     gpa: std.mem.Allocator,
+    options: Options,
 ) !void {
     const environment = readEnvironment(environ, gpa);
     const user_path = try shell.config.userPath(
@@ -352,6 +386,7 @@ fn printConfig(
     var loaded = shell.config.load(gpa, io, .{
         .user_path = user_path,
         .env = environment.config_env,
+        .theme_flag = options.theme,
     });
     defer loaded.deinit(gpa);
 
@@ -365,10 +400,29 @@ fn printConfig(
     try out.writeAll("\n");
     try live.write(out);
 
-    if (loaded.config.notes().len > 0 or live.problems().len > 0) {
+    // The theme's slots, resolved the same way `repl.run` resolves them. This
+    // is the only place a theme warning is visible before Phase 10's `/config`,
+    // exactly as it is the only place a keymap warning is visible today.
+    const themes = try shell.config.themesDir(gpa, environment.config, builtin.os.tag == .windows);
+    var theme = shell.theme.resolve(
+        gpa,
+        io,
+        loaded.config.theme.value,
+        themes,
+        loaded.config.theme.source,
+    );
+    defer theme.deinit(gpa);
+    try out.writeAll("\n");
+    try theme.result.theme.write(out);
+
+    if (loaded.config.notes().len > 0 or
+        live.problems().len > 0 or
+        theme.result.notes().len > 0)
+    {
         try out.writeAll("\n");
         try loaded.config.writeNotes(out, loaded.origins);
         try live.writeProblems(out, loaded.origins);
+        try theme.result.writeNotes(out, theme.origin);
     }
 }
 
@@ -738,6 +792,32 @@ test "the version fast path writes the built version" {
     const written = writer.buffered();
     try testing.expect(std.mem.endsWith(u8, written, "\n"));
     try testing.expectEqualStrings(core.version.string, written[0 .. written.len - 1]);
+}
+
+test "--theme sets the theme at the flag layer" {
+    const options = parseArgs(&.{ "tug", "--theme", "light" });
+    try testing.expectEqualStrings("light", options.theme.?);
+    try testing.expectEqual(Command.shell, options.command);
+}
+
+test "--theme with no value is ignored rather than fatal" {
+    // The rule the whole argument parser follows: a malformed flag is a
+    // warning-shaped nothing, never a reason a shell will not open.
+    const options = parseArgs(&.{ "tug", "--theme" });
+    try testing.expectEqual(@as(?[]const u8, null), options.theme);
+    try testing.expectEqual(Command.shell, options.command);
+}
+
+test "--theme composes with --debug-config, in either order" {
+    // `--debug-config` is the one command that reads a config, so it is the one
+    // command a `--theme` beside it has to survive.
+    const after = parseArgs(&.{ "tug", "--debug-config", "--theme", "light" });
+    try testing.expectEqual(Command.debug_config, after.command);
+    try testing.expectEqualStrings("light", after.theme.?);
+
+    const before = parseArgs(&.{ "tug", "--theme", "light", "--debug-config" });
+    try testing.expectEqual(Command.debug_config, before.command);
+    try testing.expectEqualStrings("light", before.theme.?);
 }
 
 test "eqlAny matches any candidate and rejects the rest" {

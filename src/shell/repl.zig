@@ -37,6 +37,7 @@ const editor_mod = @import("edit/editor.zig");
 const history_mod = @import("edit/history.zig");
 const key_mod = @import("input/key.zig");
 const keymap_mod = @import("input/keymap.zig");
+const theme_mod = @import("theme/registry.zig");
 const loop_mod = @import("loop/loop.zig");
 const modes = @import("term/modes.zig");
 const probe_mod = @import("term/probe.zig");
@@ -382,6 +383,9 @@ pub const Setup = struct {
     /// Borrowed for the whole call. Null means no persistent history.
     history_path: ?[]const u8,
     provider: ?Provider,
+    /// Where user themes live, or null when nothing in the environment names a
+    /// directory. Beside `config` because it comes from the same `Location`.
+    theme_dir: ?[]const u8 = null,
     /// Where the config files are and what the environment says about them.
     /// Read after the first paint — see `run`.
     config: config_mod.Sources = .{},
@@ -437,7 +441,11 @@ pub fn run(
     defer history.deinit();
 
     // The first paint. Everything below this line happens with a prompt already
-    // on screen.
+    // on screen — painted with `Theme.fallback`, the terminal's own colours,
+    // because no config has been read yet. That is the same trade the probe
+    // makes twenty lines below and it is deliberate: the cold-start budget is
+    // 10 ms, and what lands in scrollback from this frame is one empty prompt
+    // row. Do not move the config load above it.
     renderer.setPrompt(.{ .text = "", .cursor = 0 });
     _ = try renderer.paint(screen);
     try screen.flush();
@@ -457,6 +465,25 @@ pub fn run(
     // as never having had one.
     if (!loaded.config.history_enabled.value) history.path = null;
     history.max_entries = loaded.config.history_max_entries.value;
+
+    // Resolved here rather than after the probe, because the *name* does not
+    // depend on the terminal — only the tier it is painted at does, and the
+    // renderer reads that from `caps` at the moment it writes each escape.
+    //
+    // Its warnings are not printed, for the reason the keymap's are not: there
+    // is nowhere to put them until Phase 10's `/config` renders a notice block,
+    // and a shell that opened with three lines of scrollback about a colour
+    // would be worse than one quietly using the built-in. `--debug-config` is
+    // where they are visible today.
+    var theme = theme_mod.resolve(
+        gpa,
+        io,
+        loaded.config.theme.value,
+        setup.theme_dir,
+        loaded.config.theme.source,
+    );
+    defer theme.deinit(gpa);
+    renderer.setTheme(theme.result.theme);
 
     var probe_buffer: [probe_mod.buffer_bytes]u8 = undefined;
     const probed = probe_mod.run(io, &terminal, &probe_buffer);
