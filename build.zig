@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// Bumped by hand. `--version` reads it through the `build_options` module, so
 /// there is exactly one place it is written down.
-const version = "0.1.0-dev";
+const version = "0.1.0";
 
 /// The v0.1 binary-size budget from the roadmap: 500 KiB, ReleaseSmall,
 /// stripped, static Linux x86_64. `zig build size` prints the number, and the
