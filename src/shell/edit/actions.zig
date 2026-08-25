@@ -39,6 +39,11 @@ pub const Action = enum {
     quit,
     end_of_input,
     clear_screen,
+    /// Finish the command name at the head of the draft. Named rather than
+    /// wired to a key inside the editor because the editor cannot see the
+    /// command table, and because a person who wants completion on a different
+    /// chord should get it from a config file like everything else.
+    complete,
     move_left,
     move_right,
     move_word_left,
@@ -78,6 +83,7 @@ pub const bindings: []const Binding = &.{
     .{ .chord = .{ .key = .{ .char = 'c' }, .mods = .{ .ctrl = true } }, .action = .interrupt },
     .{ .chord = .{ .key = .{ .char = 'd' }, .mods = .{ .ctrl = true } }, .action = .end_of_input },
     .{ .chord = .{ .key = .{ .char = 'l' }, .mods = .{ .ctrl = true } }, .action = .clear_screen },
+    .{ .chord = .{ .key = .tab }, .action = .complete },
 
     .{ .chord = .{ .key = .left }, .action = .move_left },
     .{ .chord = .{ .key = .right }, .action = .move_right },
@@ -113,6 +119,7 @@ pub const Outcome = enum {
     quit,
     end_of_input,
     clear_screen,
+    complete,
     history_prev,
     history_next,
 };
@@ -132,6 +139,7 @@ pub fn applyEdit(editor: *Editor, action: Action) std.mem.Allocator.Error!Outcom
         .quit => return .quit,
         .end_of_input => return .end_of_input,
         .clear_screen => return .clear_screen,
+        .complete => return .complete,
         .history_prev => return .history_prev,
         .history_next => return .history_next,
 
@@ -179,6 +187,7 @@ pub fn help(action: Action) []const u8 {
         .quit => "leave tug",
         .end_of_input => "delete forward, or quit on an empty draft",
         .clear_screen => "clear the screen and repaint",
+        .complete => "complete the command name at the start of the draft",
         .move_left => "move back one character",
         .move_right => "move forward one character",
         .move_word_left => "move back one word",
@@ -225,6 +234,7 @@ pub fn category(action: Action) Category {
         => .movement,
 
         .newline,
+        .complete,
         .delete_back,
         .delete_forward,
         .kill_word_back,
@@ -350,4 +360,37 @@ test "an explicit history action never moves the cursor" {
     try testing.expectEqual(@as(usize, 0), editor.cursor);
     try testing.expectEqual(Outcome.history_next, try applyEdit(&editor, .history_next));
     try testing.expectEqual(@as(usize, 0), editor.cursor);
+}
+
+test "tab is bound to complete, and complete is the editor's business to hand back" {
+    // The binding table is the registry, so the assertion is about the table
+    // rather than about a switch somewhere downstream.
+    var found = false;
+    for (bindings) |binding| {
+        if (binding.action != .complete) continue;
+        try testing.expectEqual(Key.tab, binding.chord.key);
+        try testing.expectEqual(Mods{}, binding.chord.mods);
+        try testing.expectEqual(Availability.always, binding.when);
+        found = true;
+    }
+    try testing.expect(found);
+
+    // `complete` needs the command table, which the editor cannot see, so it
+    // comes back by name the way `submit` and `clear_screen` do.
+    var editor: Editor = .init(testing.allocator);
+    defer editor.deinit();
+    try editor.insert("/hel");
+    try testing.expectEqual(Outcome.complete, try applyEdit(&editor, .complete));
+    // And it did not touch the draft on the way out.
+    try testing.expectEqualStrings("/hel", editor.items());
+}
+
+test "every action has a help line and a category" {
+    // The two tables `--help` and `/keys` read. An action missing from either
+    // is an action that is invisible on the screen that exists to list it.
+    inline for (@typeInfo(Action).@"enum".fields) |field| {
+        const action: Action = @enumFromInt(field.value);
+        try testing.expect(help(action).len > 0);
+        _ = category(action);
+    }
 }

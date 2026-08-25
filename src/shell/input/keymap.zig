@@ -634,6 +634,7 @@ test "the live keymap prints grouped, annotated, and with its origin" {
         \\  down               move_down            default
         \\editing
         \\  alt+enter          newline              default (without the kitty keyboard protocol)
+        \\  tab                complete             default
         \\  backspace          delete_back          default
         \\  ctrl+backspace     delete_back          default
         \\  delete             delete_forward       default

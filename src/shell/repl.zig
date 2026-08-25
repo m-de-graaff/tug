@@ -218,6 +218,7 @@ pub const Session = struct {
             .quit => self.quitting = true,
             .end_of_input => try self.endOfInput(),
             .clear_screen => try self.renderer.clearScreen(self.screen),
+            .complete => {},
             .history_prev => try self.recall(.previous),
             .history_next => try self.recall(.next),
         }
