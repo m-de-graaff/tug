@@ -143,6 +143,22 @@ jobs:
 
   # --- platform -----------------------------------------------------------
 
+  terminal-matrix:
+    name: terminals degrade rather than hang
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # Phase 1's probe-hygiene item, as a gate: on a terminal that answers
+      # neither query, `--caps` degrades inside its budget rather than hanging.
+      # It used to hang, which is carried item 1 and the reason this row exists.
+      # The four terminal-emulator rows are not scriptable anywhere and are
+      # recorded as unrecorded in docs/terminal-matrix.md.
+      - run: zig build
+      - run: sh scripts/terminal-matrix.sh zig-out/bin/tug
+
   windows-compile:
     name: windows compiles (tier-2)
     runs-on: windows-2022
@@ -245,6 +261,7 @@ jobs:
         version-latency,
         first-paint,
         idle-budget,
+        terminal-matrix,
         windows-compile,
         mock-modes,
         editor-session,
