@@ -83,6 +83,10 @@ pub const Parser = struct {
     pos: usize = 0,
 
     data_len: usize = 0,
+    /// Whether any `data:` field arrived for the event being built. Not the same
+    /// as `data_len > 0`: a lone `data` line with no value is an empty payload,
+    /// and it dispatches.
+    has_data: bool = false,
     event_buf: [name_capacity]u8 = undefined,
     event_len: usize = 0,
     id_buf: [name_capacity]u8 = undefined,
@@ -95,6 +99,12 @@ pub const Parser = struct {
     /// Set when the previous `next` returned an event, so its buffers are held
     /// intact for the caller and cleared only when the caller asks for more.
     dispatched: bool = false,
+    /// The failure that stopped the stream, if one did.
+    ///
+    /// `next` returns null both for "feed me more" and for "this stream cannot
+    /// be followed", and those mean opposite things to a caller. This is how it
+    /// tells them apart; Phase 4 turns a non-null value into a `decode` event.
+    failure: ?Error = null,
 
     pub fn init(scratch: []u8, data: []u8) Parser {
         return .{ .scratch = scratch, .data = data };
@@ -106,10 +116,21 @@ pub const Parser = struct {
 
         self.compact();
 
-        if (bytes.len > self.scratch.len - self.len) return error.LineTooLong;
+        if (bytes.len > self.scratch.len - self.len) {
+            self.failure = error.LineTooLong;
+            return error.LineTooLong;
+        }
 
         @memcpy(self.scratch[self.len..][0..bytes.len], bytes);
         self.len += bytes.len;
+    }
+
+    /// What stopped the stream, or null if nothing did.
+    ///
+    /// Check this whenever `next` returns null and no more bytes are coming, or
+    /// whenever a stream stops producing while the transport is still open.
+    pub fn failed(self: *const Parser) ?Error {
+        return self.failure;
     }
 
     /// The next dispatched event, or null when the buffer holds no complete one.
@@ -125,15 +146,16 @@ pub const Parser = struct {
             self.dispatched = false;
             self.event_len = 0;
             self.data_len = 0;
+            self.has_data = false;
             self.retry = null;
         }
 
         while (self.takeLine()) |line| {
             if (line.len == 0) {
-                // A blank line dispatches — unless nothing accumulated, which is
-                // what a bare `event: ping` is. The specification drops those,
+                // A blank line dispatches — unless no data field arrived, which
+                // is what a bare `event: ping` is. The specification drops those,
                 // and so does every consumer that would otherwise filter them.
-                if (self.data_len == 0) {
+                if (!self.has_data) {
                     self.event_len = 0;
                     self.retry = null;
                     continue;
@@ -142,17 +164,19 @@ pub const Parser = struct {
                 self.dispatched = true;
                 return .{
                     .event = self.event_buf[0..self.event_len],
-                    .data = self.data[0..self.data_len],
+                    // Minus the trailing newline the accumulator always appends.
+                    .data = self.data[0 .. self.data_len - 1],
                     .id = self.id_buf[0..self.id_len],
                     .retry = self.retry,
                 };
             }
 
-            self.field(line) catch {
+            self.field(line) catch |err| {
                 // An overlong name or payload is a stream tug cannot follow, and
                 // `next` has no error union by design — the same shape the input
-                // decoder uses. Phase 4 surfaces it as a `decode` event; here it
-                // simply stops producing.
+                // decoder uses. It records what happened instead, and `failed`
+                // is how the caller tells this apart from "feed me more".
+                self.failure = err;
                 return null;
             };
         }
@@ -178,6 +202,11 @@ pub const Parser = struct {
     /// as a terminator, because the LF that would pair with it may be in the
     /// next chunk — the single case that makes chunk boundaries visible if it is
     /// got wrong.
+    ///
+    /// The known cost: a stream whose last byte is a bare CR never dispatches
+    /// its final line, because nothing here knows the stream ended. Only the
+    /// transport does. Phase 3 is where that gets a `finish` to call, and until
+    /// there is a transport to call it there is nothing to write.
     fn takeLine(self: *Parser) ?[]const u8 {
         @setRuntimeSafety(true);
 
@@ -227,19 +256,20 @@ pub const Parser = struct {
         var value = if (colon) |at| line[at + 1 ..] else line[0..0];
 
         // Exactly one leading space is part of the framing; a second is data.
-        // mutated
+        if (value.len > 0 and value[0] == ' ') value = value[1..];
 
         if (std.mem.eql(u8, name, "data")) {
-            // Multi-line data joins with a newline — between the lines, never
-            // before the first, or every payload gains a leading blank line.
-            if (self.data_len > 0) {
-                if (self.data_len + 1 > self.data.len) return error.DataTooLong;
-                self.data[self.data_len] = '\n';
-                self.data_len += 1;
-            }
-            if (self.data_len + value.len > self.data.len) return error.DataTooLong;
+            // The specification's algorithm exactly: append the value and a
+            // newline every time, and strip the last newline at dispatch. The
+            // obvious shortcut — join with a newline between lines — gets
+            // `data\ndata: after` wrong, because it cannot tell an empty value
+            // from no value at all.
+            if (self.data_len + value.len + 1 > self.data.len) return error.DataTooLong;
             @memcpy(self.data[self.data_len..][0..value.len], value);
             self.data_len += value.len;
+            self.data[self.data_len] = '\n';
+            self.data_len += 1;
+            self.has_data = true;
             return;
         }
 
@@ -368,6 +398,202 @@ test "an absurd line is a decode error, not unbounded buffering" {
     @memset(&flood, 'x');
 
     try testing.expectError(error.LineTooLong, parser.feed(&flood));
+}
+
+// --- the specification's awkward corners, one test each ---------------------
+
+test "CRLF terminates a line" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data: hello\r\n\r\n", &events);
+    try testing.expectEqual(@as(usize, 1), events.items.len);
+    try testing.expectEqualStrings("hello", events.items[0].data);
+}
+
+test "a bare CR terminates a line" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data: hello\r\r\n", &events);
+    try testing.expectEqual(@as(usize, 1), events.items.len);
+    try testing.expectEqualStrings("hello", events.items[0].data);
+}
+
+test "a CR at the end of what has arrived waits for its partner" {
+    var scratch: [256]u8 = undefined;
+    var data: [256]u8 = undefined;
+    var parser: Parser = .init(&scratch, &data);
+
+    // The LF that would pair with this CR may be in the next chunk, and
+    // guessing wrong splits one line into two. Nothing dispatches yet.
+    try parser.feed("data: hello\r");
+    try testing.expect(parser.next() == null);
+
+    try parser.feed("\n\n");
+    try testing.expectEqualStrings("hello", parser.next().?.data);
+}
+
+test "terminators may be mixed within one stream" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data: one\r\n\ndata: two\n\r\n", &events);
+    try testing.expectEqual(@as(usize, 2), events.items.len);
+    try testing.expectEqualStrings("one", events.items[0].data);
+    try testing.expectEqualStrings("two", events.items[1].data);
+}
+
+test "multi-line data joins with a newline" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data: one\ndata: two\ndata: three\n\n", &events);
+    try testing.expectEqualStrings("one\ntwo\nthree", events.items[0].data);
+}
+
+test "a comment line is ignored" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    // Some servers send `:` keepalives every fifteen seconds. They are not
+    // events and must reset nothing.
+    try collect(": keepalive\ndata: hello\n\n", &events);
+    try testing.expectEqual(@as(usize, 1), events.items.len);
+    try testing.expectEqualStrings("hello", events.items[0].data);
+}
+
+test "a comment mid-event does not interrupt it" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data: one\n: keepalive\ndata: two\n\n", &events);
+    try testing.expectEqual(@as(usize, 1), events.items.len);
+    try testing.expectEqualStrings("one\ntwo", events.items[0].data);
+}
+
+test "exactly one leading space is stripped from a value" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data:  two spaces\n\n", &events);
+    try testing.expectEqualStrings(" two spaces", events.items[0].data);
+}
+
+test "a value with no space after the colon keeps every byte" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data:{\"a\":1}\n\n", &events);
+    try testing.expectEqualStrings("{\"a\":1}", events.items[0].data);
+}
+
+test "a field with no colon has an empty value" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data\ndata: after\n\n", &events);
+    try testing.expectEqualStrings("\nafter", events.items[0].data);
+}
+
+test "a leading BOM is skipped once" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("\xEF\xBB\xBFdata: hello\n\n", &events);
+    try testing.expectEqual(@as(usize, 1), events.items.len);
+    try testing.expectEqualStrings("hello", events.items[0].data);
+}
+
+test "a BOM anywhere else is data" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("data: \xEF\xBB\xBFhello\n\n", &events);
+    try testing.expectEqualStrings("\xEF\xBB\xBFhello", events.items[0].data);
+}
+
+test "unknown fields are ignored" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    // What lets a server add a field without breaking every client.
+    try collect("banana: yes\ndata: hello\n\n", &events);
+    try testing.expectEqual(@as(usize, 1), events.items.len);
+    try testing.expectEqualStrings("hello", events.items[0].data);
+}
+
+test "a non-numeric retry is ignored rather than fatal" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("retry: soon\ndata: hello\n\n", &events);
+    try testing.expect(events.items[0].retry == null);
+}
+
+test "an out-of-range retry is ignored rather than wrapped" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("retry: 99999999999999999999\ndata: hello\n\n", &events);
+    try testing.expect(events.items[0].retry == null);
+}
+
+test "an id containing NUL is ignored" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    try collect("id: a\x00b\ndata: hello\n\n", &events);
+    try testing.expectEqualStrings("", events.items[0].id);
+}
+
+test "fields reset between events, except the last event id" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+    // The specification keeps a last event ID across events and resets `event`
+    // and `data` after each dispatch. Backwards, and every event after the first
+    // inherits the first one's type.
+    try collect("event: a\nid: 1\ndata: x\n\ndata: y\n\n", &events);
+    try testing.expectEqual(@as(usize, 2), events.items.len);
+    try testing.expectEqualStrings("a", events.items[0].event);
+    try testing.expectEqualStrings("", events.items[1].event);
+    try testing.expectEqualStrings("1", events.items[1].id);
+    try testing.expectEqualStrings("y", events.items[1].data);
+}
+
+test "an overlong data accumulation stops the stream and says why" {
+    var scratch: [4096]u8 = undefined;
+    var data: [32]u8 = undefined;
+    var parser: Parser = .init(&scratch, &data);
+
+    try parser.feed("data: aaaaaaaaaaaaaaaaaaaa\ndata: bbbbbbbbbbbbbbbbbbbb\n\n");
+
+    // Null, like a parser waiting for bytes — which is exactly why `failed`
+    // exists. Phase 4 turns this into a `decode` event rather than a hang.
+    try testing.expect(parser.next() == null);
+    try testing.expectEqual(Error.DataTooLong, parser.failed().?);
+}
+
+test "a clean stream never reports a failure" {
+    var scratch: [256]u8 = undefined;
+    var data: [256]u8 = undefined;
+    var parser: Parser = .init(&scratch, &data);
+
+    try parser.feed("data: hello\n\n");
+    _ = parser.next();
+
+    try testing.expect(parser.failed() == null);
+}
+
+test "an overlong line is recorded as well as returned" {
+    var scratch: [64]u8 = undefined;
+    var data: [64]u8 = undefined;
+    var parser: Parser = .init(&scratch, &data);
+
+    var flood: [128]u8 = undefined;
+    @memset(&flood, 'x');
+
+    try testing.expectError(error.LineTooLong, parser.feed(&flood));
+    try testing.expectEqual(Error.LineTooLong, parser.failed().?);
+}
+
+test "the corners fixture decodes to what it claims" {
+    var events: std.ArrayList(ServerEvent) = .empty;
+    defer freeAll(&events);
+
+    try collect(@embedFile("framing-corners.sse"), &events);
+
+    try testing.expectEqual(@as(usize, 2), events.items.len);
+    try testing.expectEqualStrings("content_block_delta", events.items[0].event);
+    try testing.expectEqualStrings("{\"text\":\"one\"}", events.items[0].data);
+    try testing.expectEqualStrings("", events.items[1].event);
+    try testing.expectEqualStrings("line one\nline two", events.items[1].data);
+    try testing.expectEqualStrings("42", events.items[1].id);
 }
 
 test "a long stream reuses the front of the buffer" {

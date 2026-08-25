@@ -86,6 +86,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // `@embedFile` cannot reach outside a module's own directory, and the
+    // fixtures live in `testdata/` where the rest of the repo can see them. An
+    // anonymous import is the bridge: the parser's tests embed the bytes by
+    // import name, and the corpus stays one directory rather than two.
+    providers.addAnonymousImport("framing-corners.sse", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/framing-corners.sse"),
+    });
+
     const shell = b.addModule("tugshell", .{
         .root_source_file = b.path("src/shell/root.zig"),
         .target = target,

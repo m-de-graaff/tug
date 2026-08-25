@@ -1,0 +1,9 @@
+﻿: keepalive
+event: content_block_delta
+data: {"text":"one"}
+
+banana: yes
+id: 42
+data: line one
+data: line two
+

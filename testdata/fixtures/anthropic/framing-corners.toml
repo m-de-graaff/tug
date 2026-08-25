@@ -1,0 +1,15 @@
+endpoint = "https://api.anthropic.com/v1/messages"
+model = "none"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; body written by hand, response side only"
+note = """
+Every framing corner in one body: a leading byte-order mark, a comment
+keepalive, CRLF terminators on the first event and LF on the second, an unknown
+field, and a multi-line data field. Two dispatches, and the second inherits the
+id but not the event name.
+
+Not a recording of anything — no API sends this. It exists so the chunking
+invariance property has one input that exercises every branch of the line
+splitter at once.
+"""
