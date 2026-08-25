@@ -525,6 +525,29 @@ document carries the three commands that fill a row in. That is the one v0.1
 exit criterion no machine in this project's environment can close, and it has
 been open since Phase 4.
 
+**Fixed after the fact, and it was this phase's own doing.** `zig build run` on
+Windows painted the prompt, accepted no input, and died a few seconds later with
+exit code 253 — which is `STATUS_STACK_OVERFLOW` truncated to its low byte.
+`repl.run` kept a 256 KiB frame buffer on the 1 MiB stack `build.zig` asks the
+linker for. That fitted while the function had one caller; `--debug-first-paint`
+gave it a second, and Windows commits stack lazily, so the prompt painted and
+the guard page was hit on the way deeper. The buffer is one heap allocation now,
+freed with the session.
+
+Two more surfaced while confirming it. `open()` on Windows checked
+`GetConsoleMode` on the input handle only, so a console stdin with a redirected
+stdout — `tug > out.txt`, or any build runner that pipes — got past it and
+failed inside `enterRaw` with a bare `error.Unexpected` instead of the intended
+refusal. And `--debug-first-paint` printed a number computed from an undefined
+timestamp when no paint had happened, because `run` returns early when there is
+no terminal to open.
+
+**The lesson is larger than the three fixes.** Every gate in this repository was
+green while the binary a user runs was broken, because a CI runner has no
+console and every pty script is POSIX. The Windows job now asserts the
+redirected-stdout refusal, which catches one class of this and not the one that
+bit; a Windows runner with a real console is v0.9's terminal-certification work.
+
 ### Not yet
 
 Held over past v0.1, deliberately. `/theme` with no argument lists the built-ins
