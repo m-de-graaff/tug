@@ -13,6 +13,7 @@ const std = @import("std");
 
 pub const canary = @import("canary.zig");
 pub const sse = @import("sse.zig");
+pub const transport = @import("transport.zig");
 
 test {
     std.testing.refAllDecls(@This());
