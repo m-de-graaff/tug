@@ -1,0 +1,9 @@
+{"type":"text_delta","text":"hello"}
+{"type":"text_delta","text":"say \"hi\"\nthen stop"}
+{"type":"tool_call_delta","id":"toolu_01","name":"read","arguments":"{\"path\":\"/tmp/x\"}"}
+{"type":"tool_call_delta","id":"toolu_01","name":"","arguments":",\"limit\":10}"}
+{"type":"usage","input_tokens":12,"output_tokens":40,"cache_read_tokens":1200,"cache_creation_tokens":0}
+{"type":"stop","reason":"end_turn"}
+{"type":"stop","reason":"tool_use"}
+{"type":"error","kind":"rate_limit","message":"slow down","retry_after_ms":1800}
+{"type":"error","kind":"decode","message":"unterminated SSE field"}

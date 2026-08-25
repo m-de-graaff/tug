@@ -12,6 +12,7 @@ pub const stream = @import("stream.zig");
 pub const events = @import("events.zig");
 pub const request = @import("request.zig");
 pub const model = @import("model.zig");
+pub const ndjson = @import("ndjson.zig");
 
 pub const StreamEvent = stream.StreamEvent;
 pub const ToolCallDelta = stream.ToolCallDelta;
