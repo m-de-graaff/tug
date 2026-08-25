@@ -569,6 +569,29 @@ pub const Session = struct {
     pub fn hasWarnings(self: *const Session) bool {
         return self.warningCount() > 0;
     }
+
+    /// One line, once, and only when there is something behind it.
+    ///
+    /// The three lists are on `/config`. Printing them here would open a shell
+    /// with seven rows of scrollback about a comma, and a person who has just
+    /// typed a chord that did nothing needs to know there is an explanation
+    /// more than they need the explanation itself (`DR-014`).
+    pub fn warnAtStartup(self: *Session) !void {
+        const count = self.warningCount();
+        if (count == 0) return;
+
+        var buffer: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &buffer,
+            "{d} warning{s} in your configuration - run /config to see {s}",
+            .{
+                count,
+                if (count == 1) "" else "s",
+                if (count == 1) "it" else "them",
+            },
+        ) catch "there are problems in your configuration - run /config";
+        try self.notice(line);
+    }
 };
 
 /// Everything `main.zig` has already read from the environment.
@@ -728,6 +751,11 @@ pub fn run(
         .provider = setup.provider,
     };
     try bus.subscribe(.{ .context = &session, .handler = Session.onEvent });
+
+    // The three warning lists have existed since Phases 7 to 9 with nowhere to
+    // appear but `--debug-config`. This is the line that closes that, and
+    // `/config` is where the detail is.
+    try session.warnAtStartup();
 
     // Ahead of every return below, including the error ones. A thread still
     // pushing onto a queue whose stack frame is gone is the one failure worse
@@ -1349,4 +1377,41 @@ test "a command mid-stream is ignored, like every other chord that is not an int
     try harness.session.applyAction(.submit);
     harness.session.state = .idle;
     try testing.expect(!harness.session.quitting);
+}
+
+test "a clean config says nothing at startup" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    try testing.expect(!harness.session.hasWarnings());
+    try testing.expectEqual(@as(usize, 0), harness.session.warningCount());
+}
+
+test "the startup line counts every list and points at the screen with the detail" {
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    // One from the config, one from the keymap.
+    harness.config.apply(.project, "nosuch = 1\n[keys]\n\"ctrl+@@\" = \"newline\"\n");
+    harness.keymap = .build(&harness.config, true);
+    try testing.expectEqual(@as(usize, 2), harness.session.warningCount());
+
+    try harness.session.warnAtStartup();
+    try testing.expect(harness.painted(&.{ "2 warnings", "/config" }));
+}
+
+test "one warning is not two" {
+    // The singular exists because a shell that opens with `1 warnings` is a
+    // shell nobody trusts about anything else either.
+    var harness: Harness = undefined;
+    harness.init();
+    defer harness.deinit();
+
+    harness.config.apply(.project, "nosuch = 1\n");
+    try testing.expectEqual(@as(usize, 1), harness.session.warningCount());
+
+    try harness.session.warnAtStartup();
+    try testing.expect(harness.painted(&.{"1 warning in your configuration"}));
 }
