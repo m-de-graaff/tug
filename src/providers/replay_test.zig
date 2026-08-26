@@ -32,6 +32,10 @@ const Case = struct {
     head: []const u8,
     body: []const u8,
     expected: []const u8,
+    /// The preset's key variable, because an `auth` failure's message names it
+    /// and a fixture that left it empty would be asserting a different sentence
+    /// from the one a user sees.
+    env_var: []const u8 = "",
 };
 
 /// Grows in Phase 9, when `tug dev record` replaces these bodies with real
@@ -51,6 +55,23 @@ const corpus = [_]Case{
         .head = @embedFile("error-401.head"),
         .body = @embedFile("error-401.sse"),
         .expected = @embedFile("error-401.ndjson"),
+        .env_var = "ANTHROPIC_API_KEY",
+    },
+    .{
+        .name = "anthropic/error-429",
+        .shape = .anthropic,
+        .head = @embedFile("error-429.head"),
+        .body = @embedFile("error-429.sse"),
+        .expected = @embedFile("error-429.ndjson"),
+        .env_var = "ANTHROPIC_API_KEY",
+    },
+    .{
+        .name = "anthropic/error-500",
+        .shape = .anthropic,
+        .head = @embedFile("error-500.head"),
+        .body = @embedFile("error-500.sse"),
+        .expected = @embedFile("error-500.ndjson"),
+        .env_var = "ANTHROPIC_API_KEY",
     },
     .{
         .name = "anthropic/tool-call-turn",
@@ -119,6 +140,11 @@ fn replay(gpa: std.mem.Allocator, case: Case, chunk: usize) ![]u8 {
         mapper,
         &read_buffer,
     );
+    s.env_var = case.env_var;
+    // Fixed rather than read: the date form of `Retry-After` is a wait relative
+    // to now, and a corpus whose expected bytes moved every second would be a
+    // corpus nobody could commit.
+    s.now_epoch_s = 1_700_000_000;
 
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
@@ -175,7 +201,7 @@ test "replay: the corpus covers both shapes and both outcomes" {
         if (std.mem.indexOf(u8, case.expected, "\"error\"") != null) error_cases += 1;
     }
 
-    try testing.expect(anthropic_cases >= 3);
+    try testing.expect(anthropic_cases >= 5);
     try testing.expect(openai_cases >= 3);
-    try testing.expect(error_cases >= 2);
+    try testing.expect(error_cases >= 4);
 }

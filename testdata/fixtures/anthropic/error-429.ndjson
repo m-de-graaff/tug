@@ -1,0 +1,1 @@
+{"type":"error","kind":"rate_limit","message":"Number of request tokens has exceeded your per-minute rate limit - the provider is rate limiting; tug waits when it says how long","retry_after_ms":30000}

@@ -151,6 +151,14 @@ pub fn build(b: *std.Build) void {
     providers.addAnonymousImport("openai-error-404-model.ndjson", .{
         .root_source_file = b.path("testdata/fixtures/openai/error-404-model.ndjson"),
     });
+    for ([_][]const u8{
+        "error-429.head", "error-429.sse", "error-429.ndjson",
+        "error-500.head", "error-500.sse", "error-500.ndjson",
+    }) |name| {
+        providers.addAnonymousImport(name, .{
+            .root_source_file = b.path(b.fmt("testdata/fixtures/anthropic/{s}", .{name})),
+        });
+    }
 
     providers.addAnonymousImport("tool-call-turn.head", .{
         .root_source_file = b.path("testdata/fixtures/anthropic/tool-call-turn.head"),

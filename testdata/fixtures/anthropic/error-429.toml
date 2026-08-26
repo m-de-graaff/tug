@@ -1,0 +1,11 @@
+endpoint = "https://api.anthropic.com/v1/messages"
+model = "claude-sonnet-4-5"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; response side only"
+note = """
+A rate limit with an instruction attached. The `retry-after` header is the whole
+point of the fixture: `DR-019` retries a 429 that says when and refuses to guess
+for one that does not, so the presence of the header changes tug's behaviour and
+not just its message.
+"""

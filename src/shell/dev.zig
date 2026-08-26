@@ -504,10 +504,10 @@ test "a failed turn exits with the code for its error kind" {
 
     const code = try drain(&s, &stdout.writer, &stderr.writer, false);
 
-    // Phase 5 turns a 401 into `auth`; today the transport cannot tell auth from
-    // any other server answer, so this is the `server` slot. The number moves
-    // once, in the commit that adds the taxonomy.
-    try testing.expectEqual(server_exit_code, code);
+    // A 401 is an `auth` failure since the taxonomy landed, and `auth` is the
+    // one class the retry engine will never retry — so this exit code is also
+    // the signal a script needs to stop rather than loop.
+    try testing.expectEqual(auth_exit_code, code);
     try testing.expect(std.mem.indexOf(u8, stderr.written(), "invalid x-api-key") != null);
     try testing.expectEqual(@as(usize, 0), stdout.written().len);
 }

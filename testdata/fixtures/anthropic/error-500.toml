@@ -1,0 +1,10 @@
+endpoint = "https://api.anthropic.com/v1/messages"
+model = "claude-sonnet-4-5"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; response side only"
+note = """
+A 5xx with no instruction. Retryable by class, with the backoff curve rather
+than a header, and the fixture exists so the difference between this and
+`error-429` is visible in the corpus rather than only in the retry tests.
+"""

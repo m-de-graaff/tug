@@ -24,6 +24,7 @@ const proto = @import("tugproto");
 
 const seam = @import("transport.zig");
 const sse = @import("sse.zig");
+const taxonomy = @import("taxonomy.zig");
 
 /// Where a mapper puts what it produced.
 ///
@@ -71,6 +72,11 @@ pub const Mapper = struct {
 /// tug allocate; the useful sentence is always in the first few hundred bytes.
 pub const max_error_body = 4096;
 
+/// The longest error message handed to a frontend: the provider's sentence plus
+/// tug's action hint. Anything past this loses the hint and keeps the sentence,
+/// because what happened is worth more than what to do about it.
+pub const max_message = 1024;
+
 pub const Stream = struct {
     transport: seam.Transport,
     request: seam.Request,
@@ -78,12 +84,24 @@ pub const Stream = struct {
     mapper: Mapper,
     read_buffer: []u8,
 
+    /// The preset's environment variable, so an `auth` failure can name the one
+    /// a user actually has to set. Empty for a preset that needs no key.
+    env_var: []const u8 = "",
+    /// Seconds since the epoch, supplied by the frontend.
+    ///
+    /// A `Retry-After` may be an HTTP date, and turning one into a wait needs to
+    /// know what time it is. Everything above the transport seam is a pure
+    /// function of bytes (`DR-017`), so the clock is passed in rather than read
+    /// — which is also what makes the date case reproducible in a fixture test.
+    now_epoch_s: i64 = 0,
+
     state: State = .head,
     pending: Emit = .{},
     pending_index: usize = 0,
 
     error_body: [max_error_body]u8 = undefined,
     error_message: [512]u8 = undefined,
+    hinted_message: [max_message]u8 = undefined,
 
     const State = enum { head, body, done };
 
@@ -156,7 +174,37 @@ pub const Stream = struct {
             body,
             &self.error_message,
         );
-        self.fail(.server, message);
+
+        const kind = taxonomy.fromStatus(head.status);
+        self.pending.push(.{
+            .err = .{
+                .kind = kind,
+                .message = self.withHint(kind, message),
+                // Only ever present on a rate limit in practice, but the header is
+                // legal on a 503 too and honouring it there costs nothing.
+                .retry_after_ms = taxonomy.retryAfterMs(head.retry_after, self.now_epoch_s),
+            },
+        });
+        self.state = .done;
+    }
+
+    /// Appends the taxonomy's action hint to the provider's own message.
+    ///
+    /// The provider's words first, because they know what went wrong; tug's
+    /// after, because it knows what to do about it. An auth failure that does
+    /// not name the variable to set is an error message that has made the user
+    /// go and look up what tug already knew.
+    fn withHint(self: *Stream, kind: proto.ErrKind, message: []const u8) []const u8 {
+        var hint_buffer: [256]u8 = undefined;
+        const advice = taxonomy.hint(kind, self.env_var, &hint_buffer);
+
+        var writer: std.Io.Writer = .fixed(&self.hinted_message);
+        writer.print("{s} - {s}", .{ message, advice }) catch {
+            // No room for both. The provider's sentence is the one that survives:
+            // it says what happened, and the hint only says what to do about it.
+            return message;
+        };
+        return writer.buffered();
     }
 
     /// Reads an error document, bounded. Read failures are not reported: the
@@ -209,27 +257,10 @@ pub const Stream = struct {
     }
 };
 
-/// Transport failures, in the vocabulary a user reads.
-///
-/// Phase 5 owns the full taxonomy — status codes, `Retry-After`, retry classes.
-/// What is mapped here is only what the transport itself can distinguish, and
-/// the two that matter are already right: bytes that stopped arriving are
-/// `transport`, and bytes that arrived meaning nothing are `decode`.
+/// Transport failures, in the vocabulary a user reads. `taxonomy.zig` owns the
+/// mapping; this is the one call site.
 fn transportKind(err: seam.Error) proto.ErrKind {
-    return switch (err) {
-        // Every one of them, today. Phase 5 splits this on the status code —
-        // which is where the split belongs, because `auth` and `rate_limit` are
-        // things a server said, not things a socket did.
-        error.Connect,
-        error.Tls,
-        error.Timeout,
-        error.Closed,
-        error.Canceled,
-        error.Refused,
-        error.Protocol,
-        error.OutOfMemory,
-        => .transport,
-    };
+    return taxonomy.fromTransport(err);
 }
 
 fn transportMessage(err: seam.Error) []const u8 {
@@ -276,6 +307,8 @@ const Harness = struct {
     read_buffer: [64]u8 = undefined,
     parser: sse.Parser = undefined,
     stream: Stream = undefined,
+    env_var: []const u8 = "",
+    now_epoch_s: i64 = 0,
 
     fn open(self: *Harness, f: *fixture.Fixture) core.Provider {
         self.parser = .init(&self.scratch, &self.data);
@@ -286,6 +319,8 @@ const Harness = struct {
             Echo.mapper(),
             &self.read_buffer,
         );
+        self.stream.env_var = self.env_var;
+        self.stream.now_epoch_s = self.now_epoch_s;
         return self.stream.provider();
     }
 };
@@ -368,9 +403,94 @@ test "a non-200 head never reaches the SSE parser" {
     const p = harness.open(&f);
 
     const failure = p.nextEvent().?.err;
-    try testing.expectEqual(proto.ErrKind.server, failure.kind);
+    try testing.expectEqual(proto.ErrKind.auth, failure.kind);
     try testing.expect(std.mem.indexOf(u8, failure.message, "invalid x-api-key") != null);
     try testing.expect(p.nextEvent() == null);
+}
+
+test "a 401 names the variable the user has to set" {
+    // The M2 placeholder called every non-200 a server error and offered no
+    // advice. This is the test that retires it.
+    var f: fixture.Fixture = .{
+        .head = .{ .status = 401, .content_type = "application/json" },
+        .body = "{\"error\":{\"message\":\"invalid x-api-key\"}}",
+        .chunk = 64,
+    };
+
+    var harness: Harness = .{};
+    harness.env_var = "ANTHROPIC_API_KEY";
+    const p = harness.open(&f);
+
+    const failure = p.nextEvent().?.err;
+    try testing.expectEqual(proto.ErrKind.auth, failure.kind);
+    // The provider's words first, tug's advice after.
+    try testing.expect(std.mem.indexOf(u8, failure.message, "invalid x-api-key") != null);
+    try testing.expect(std.mem.indexOf(u8, failure.message, "export ANTHROPIC_API_KEY=") != null);
+}
+
+test "a 429 carries the wait the server asked for" {
+    var f: fixture.Fixture = .{
+        .head = .{ .status = 429, .content_type = "application/json", .retry_after = "30" },
+        .body = "{\"error\":{\"message\":\"slow down\"}}",
+        .chunk = 64,
+    };
+
+    var harness: Harness = .{};
+    const p = harness.open(&f);
+
+    const failure = p.nextEvent().?.err;
+    try testing.expectEqual(proto.ErrKind.rate_limit, failure.kind);
+    try testing.expectEqual(@as(?u32, 30_000), failure.retry_after_ms);
+}
+
+test "a 429 with no header carries no instruction" {
+    // Which is the difference `DR-019` acts on: tug waits when told how long and
+    // refuses to guess when it is not.
+    var f: fixture.Fixture = .{
+        .head = .{ .status = 429, .content_type = "application/json" },
+        .body = "{\"error\":{\"message\":\"slow down\"}}",
+        .chunk = 64,
+    };
+
+    var harness: Harness = .{};
+    const p = harness.open(&f);
+
+    const failure = p.nextEvent().?.err;
+    try testing.expectEqual(proto.ErrKind.rate_limit, failure.kind);
+    try testing.expect(failure.retry_after_ms == null);
+}
+
+test "a 500 is a server error and carries no instruction" {
+    var f: fixture.Fixture = .{
+        .head = .{ .status = 500, .content_type = "application/json" },
+        .body = "{\"error\":{\"message\":\"Internal server error\"}}",
+        .chunk = 64,
+    };
+
+    var harness: Harness = .{};
+    const p = harness.open(&f);
+
+    const failure = p.nextEvent().?.err;
+    try testing.expectEqual(proto.ErrKind.server, failure.kind);
+    try testing.expect(failure.retry_after_ms == null);
+}
+
+test "a retry-after given as a date needs the clock the frontend passed in" {
+    var f: fixture.Fixture = .{
+        .head = .{
+            .status = 429,
+            .content_type = "application/json",
+            .retry_after = "Tue, 14 Nov 2023 22:14:20 GMT",
+        },
+        .body = "{\"error\":{\"message\":\"slow down\"}}",
+        .chunk = 64,
+    };
+
+    var harness: Harness = .{};
+    harness.now_epoch_s = 1_700_000_000; // 2023-11-14T22:13:20Z
+    const p = harness.open(&f);
+
+    try testing.expectEqual(@as(?u32, 60_000), p.nextEvent().?.err.retry_after_ms);
 }
 
 test "an enormous error body is bounded rather than buffered" {
@@ -385,7 +505,7 @@ test "an enormous error body is bounded rather than buffered" {
     const p = harness.open(&f);
 
     const failure = p.nextEvent().?.err;
-    try testing.expect(failure.message.len <= 512);
+    try testing.expect(failure.message.len <= max_message);
     try testing.expect(p.nextEvent() == null);
 }
 
