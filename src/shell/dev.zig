@@ -21,6 +21,7 @@ const proto = @import("tugproto");
 const providers = @import("tugproviders");
 
 const sse = providers.sse;
+const usage_line = @import("render/usage.zig");
 
 /// The `decode` slot in the Phase 8 exit-code taxonomy (`DR-020`). Spending it
 /// here costs nothing and gives the taxonomy one caller before it is written
@@ -305,7 +306,21 @@ pub fn stream(
     const transport = client.transport();
     defer transport.close();
 
-    return drain(&turn_stream, out, notices, options.json);
+    const resolution = core.models.resolve(&.{}, options.model, .flag);
+    const started: std.Io.Clock.Timestamp = .now(io, .awake);
+
+    const code = try drain(&turn_stream, out, notices, .{
+        .json = options.json,
+        .model_id = resolution.model.id,
+        .priced = resolution.priced,
+        .price = resolution.model.price,
+        // Only the Messages API reports cache activity in this version, and
+        // only when the prompt is long enough to be cacheable at all.
+        .reports_cache = entry.shape == .anthropic,
+        .elapsed_ms = @intCast(@max(0, std.Io.Clock.Timestamp.now(io, .awake).raw.toMilliseconds() -
+            started.raw.toMilliseconds())),
+    });
+    return code;
 }
 
 /// Pulls a whole turn, writing text to `out` and everything else to `notices`.
@@ -313,12 +328,25 @@ pub fn stream(
 /// Split out from `stream` so the offline tests can drive it with a fixture
 /// transport: everything above the seam is pure, and this is the last function
 /// that is.
+pub const DrainOptions = struct {
+    json: bool = false,
+    /// Resolved by the caller, so this function does not need the model table.
+    model_id: []const u8 = "",
+    priced: bool = false,
+    price: proto.Price = .{},
+    /// False for a provider that does not report cache activity at all, so the
+    /// usage line can tell "did not report" from "missed" — see `render/usage`.
+    reports_cache: bool = true,
+    elapsed_ms: u64 = 0,
+};
+
 pub fn drain(
     turn_stream: *providers.stream.Stream,
     out: *std.Io.Writer,
     notices: *std.Io.Writer,
-    json: bool,
+    options: DrainOptions,
 ) !u8 {
+    const json = options.json;
     var said_tools = false;
     var last_usage: ?proto.Usage = null;
     var code: u8 = 0;
@@ -356,10 +384,25 @@ pub fn drain(
 
     if (!json) {
         if (last_usage) |usage| {
-            try notices.print(
-                "\n{d} in, {d} out, {d} cached\n",
-                .{ usage.input_tokens, usage.output_tokens, usage.cache_read_tokens },
-            );
+            // The real line, with its own rules about what it refuses to claim:
+            // a cached count below the noise floor is not shown, and an unpriced
+            // model gets no cost rather than `$0.00`.
+            const model: proto.Model = .{
+                .id = options.model_id,
+                .provider = .anthropic,
+                .context_window = 0,
+                .price = options.price,
+            };
+            try notices.writeByte('\n');
+            try usage_line.write(.{
+                .usage = usage,
+                .model_id = options.model_id,
+                .priced = options.priced,
+                .cost = model.cost(usage),
+                .elapsed_ms = options.elapsed_ms,
+                .reports_cache = options.reports_cache,
+            }, notices);
+            try notices.writeByte('\n');
         }
     }
     try notices.flush();
@@ -464,7 +507,7 @@ test "dev stream prints model text on stdout and nothing else" {
     var stderr: std.Io.Writer.Allocating = .init(testing.allocator);
     defer stderr.deinit();
 
-    const code = try drain(replay.open(), &stdout.writer, &stderr.writer, false);
+    const code = try drain(replay.open(), &stdout.writer, &stderr.writer, .{ .model_id = "claude-sonnet-4-5" });
 
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings(
@@ -487,7 +530,7 @@ test "a model that asks for a tool gets one notice, not one per fragment" {
     var stderr: std.Io.Writer.Allocating = .init(testing.allocator);
     defer stderr.deinit();
 
-    _ = try drain(replay.open(), &stdout.writer, &stderr.writer, false);
+    _ = try drain(replay.open(), &stdout.writer, &stderr.writer, .{ .model_id = "claude-sonnet-4-5" });
 
     var count: usize = 0;
     var i: usize = 0;
@@ -508,7 +551,7 @@ test "--json puts the wire vocabulary on stdout and keeps text off it" {
     var stderr: std.Io.Writer.Allocating = .init(testing.allocator);
     defer stderr.deinit();
 
-    _ = try drain(replay.open(), &stdout.writer, &stderr.writer, true);
+    _ = try drain(replay.open(), &stdout.writer, &stderr.writer, .{ .json = true });
 
     // The same bytes the replay proof compares against, and the same bytes
     // Phase 8's --json will print.
@@ -544,7 +587,7 @@ test "a failed turn exits with the code for its error kind" {
     var stderr: std.Io.Writer.Allocating = .init(testing.allocator);
     defer stderr.deinit();
 
-    const code = try drain(&s, &stdout.writer, &stderr.writer, false);
+    const code = try drain(&s, &stdout.writer, &stderr.writer, .{});
 
     // A 401 is an `auth` failure since the taxonomy landed, and `auth` is the
     // one class the retry engine will never retry — so this exit code is also

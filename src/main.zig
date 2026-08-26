@@ -23,7 +23,19 @@ pub const panic = panic_handler.handler;
 /// constructs a client before the first request. TLS is 1.3-only, which is what
 /// the standard library's TLS offers and what every endpoint tug talks to
 /// serves; `DR-023` is where the evidence for keeping it is written down.
-pub const std_options: std.Options = .{};
+pub const std_options: std.Options = .{
+    // Off, in every build. The standard library prints a stack trace to stderr
+    // whenever a syscall returns an error code it has no name for, and on a
+    // v4-only network the IPv6 half of happy-eyeballs returns exactly that —
+    // `NETWORK_UNREACHABLE` on Windows — on every single request. The result
+    // was eight frames of hex printed above a perfectly good answer.
+    //
+    // Nothing is lost. Those errors are already mapped by the transport into
+    // the taxonomy (`transport`), which is the version of them a user can act
+    // on; the trace was a second, worse report of a failure tug had already
+    // handled.
+    .unexpected_error_tracing = false,
+};
 
 /// Caps the total length of the command line tug will parse. Arguments arrive
 /// on Windows as one string that must be split into an owned slice, so this

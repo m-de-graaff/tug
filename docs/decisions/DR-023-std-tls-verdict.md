@@ -43,14 +43,20 @@ A row here is a handshake somebody actually performed on a dated day.
 
 | Endpoint | Date | TLS version | Handshake | Notes |
 |---|---|---|---|---|
+| api.anthropic.com | 2026-08-26 | TLS 1.3 | ✅ first try | Windows 11 and WSL, ordinary consumer network, no proxy. System certificate bundle loaded from the platform store on both. No 1.2 fallback needed and none available. |
 
 ## Decision
 
-**Not yet made.** This record cannot be closed from a developer's machine: it
-needs three dated endpoint rows, and two of them arrive with Phase 10's smoke
-checklist. Closing it early would mean writing a verdict from imagination and
-then finding the evidence to match, which is the failure mode a decision record
-exists to prevent.
+**Not yet made**, but the first evidence is in. `std.crypto.tls` completed a 1.3
+handshake with Anthropic on the first attempt from two operating systems, which
+is the single most important row in the table and the one most likely to have
+failed. Two rows remain — a hosted OpenAI-compatible service and, for
+completeness rather than for TLS, local Ollama over plaintext.
+
+This record still cannot be closed. One endpoint on one network is not evidence
+about middleboxes, and the whole question is what happens on somebody else's.
+Closing it here would mean writing the verdict from imagination and then finding
+evidence to match, which is the failure mode a decision record exists to prevent.
 
 What is decided now, and is not the verdict: the engine is reached only through
 `src/providers/transport/http.zig` (`DR-016`, `DR-017`), so swapping it is a

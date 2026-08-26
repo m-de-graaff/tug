@@ -114,6 +114,13 @@ OpenAI-compatible servers get no markers, because there is nothing to send: that
 side of the ecosystem caches server-side or not at all. Cached tokens are
 reported when a server supplies the number and reported as zero when it does not.
 
+**A short prompt never caches.** Anthropic declines to create a cache entry below
+a minimum prefix length — roughly 1024 tokens for Sonnet and Opus, more for
+Haiku — so a one-line question shows `0 cached` however many times you repeat it.
+The markers are on the request regardless; the API is deciding it is not worth
+caching, which for a twenty-token prompt it is not. Caching pays off where it was
+meant to: a long system prompt, or a conversation several turns deep.
+
 ## Streaming a turn today
 
 There is no provider in the shell yet — Phase 7 is where the terminal frontend
