@@ -4,10 +4,12 @@ Seven presets, two API shapes, one implementation each. Copy-paste first.
 
 ## Setting a key
 
-One environment variable per preset, and nothing else in v0.2. The config file,
-`key_cmd = "pass show anthropic"`, and the flag → env → config → command
-resolution chain all arrive in Phase 5; until then this is the whole story, and
-saying so is better than implying otherwise.
+Four places, first hit wins (`DR-024`):
+
+1. `--key` on the command line
+2. The preset's environment variable
+3. `provider.key` in a config file
+4. `provider.key_cmd` in a config file
 
 ```sh
 export ANTHROPIC_API_KEY=...     # anthropic
@@ -18,9 +20,41 @@ export VLLM_API_KEY=...          # vllm
 # ollama and lmstudio need none
 ```
 
+There is no `TUG_KEY`, deliberately. A second spelling for the same secret is a
+second place to leak one from.
+
 If a key is missing, tug prints the export line for the preset you asked for.
 That is deliberate: an error message about credentials should be something you
 can paste, not something you have to go and look up.
+
+### Keeping the key out of a file
+
+```toml
+[provider]
+key_cmd = "pass show anthropic"
+```
+
+Run once at first use and kept in memory for the process — not per turn, because
+that means a passphrase prompt per turn. Anything that prints a key to stdout
+works: `pass`, `gopass`, `age -d`, `op read`, `vault kv get -field=…`, or a shell
+function of your own. tug knows nothing about any of them, which is the point.
+
+The command is split on whitespace and run directly. It is a command, not a shell
+script: no pipes, no globs, no `&&`. If you need those, put them in a script and
+name the script.
+
+If it fails, tug shows the command's own stderr — that is nearly always the
+useful message ("gpg: decryption failed: No secret key") — with anything
+key-shaped scrubbed out of it first.
+
+`provider.key = "..."` also works and the documentation does not recommend it. It
+is supported because a user who has decided to put a key in a file will do it
+regardless, and a key in a shell profile is not an improvement over a key in a
+config file.
+
+**`/config` never prints the key.** It shows `<set>` or `<unset>` and which layer
+set it. `key_cmd` *is* printed, because it is the instruction rather than the
+secret and hiding it would make a broken `key_cmd` impossible to diagnose.
 
 ## The table
 
@@ -48,8 +82,15 @@ The check is on the whole hostname, never a prefix. `localhost.example.com` is a
 perfectly ordinary registrable name belonging to somebody else, and it is not
 loopback.
 
-There is one escape hatch, per endpoint, and it is not in the config schema until
-Phase 6. If you need it before then, you need a reverse proxy with TLS on it.
+One escape hatch, and it is the whole configuration rather than per endpoint:
+
+```toml
+[provider]
+insecure = true
+```
+
+Turning it on for one endpoint turns it on for all of them, which is why the
+documentation says use a reverse proxy with TLS on it instead.
 
 **A proxy is not seen through.** If `https_proxy` routes your requests through a
 plaintext hop, tug does not inspect that and does not warn about it. Documented
@@ -87,6 +128,26 @@ zig build -Doptimize=Debug
 Model text goes to stdout and every diagnostic to stderr, so `... | wc -c`
 measures the answer. `--json` puts ndjson `StreamEvent`s on stdout instead —
 byte for byte the vocabulary Phase 8's `--json` prints and v0.5's plugins speak.
+
+## When things fail
+
+Every error tug shows names a class and says what to do about it:
+
+| Class | What it means | What tug does |
+|---|---|---|
+| `auth` | 401 or 403 | Names the variable to export. **Never retried** — a wrong key is wrong on the fourth attempt too |
+| `rate_limit` | 429 | Retried **only** when the provider sent a `Retry-After`. tug waits exactly as long as it was told |
+| `server` | 5xx, and any other status a provider returned | Retried with jittered backoff |
+| `transport` | The bytes stopped arriving | Retried |
+| `decode` | The response was not what the API documents | **Never retried.** Bytes that failed to parse will not parse later, and this is worth reporting |
+
+A 429 with no `Retry-After` is not retried. The provider declined to say when,
+and guessing is how a client becomes part of the incident it is reacting to.
+
+**Retries stop the moment any output has arrived.** If a stream dies at the
+fortieth token, you keep those forty tokens and an error saying it ended early.
+tug will not silently splice two model responses together and present them as
+one — see `DR-019`.
 
 ## Tools
 

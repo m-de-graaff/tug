@@ -3,6 +3,12 @@
 \e[2mtheme                nope                 project\e[0m\r
 \e[2mhistory.enabled      true                 default\e[0m\r
 \e[2mhistory.max_entries  1000                 default\e[0m\r
+\e[2mprovider.preset                           default\e[0m\r
+\e[2mprovider.model                            default\e[0m\r
+\e[2mprovider.key         <unset>              default\e[0m\r
+\e[2mprovider.key_cmd                          default\e[0m\r
+\e[2mprovider.timeout_ms  60000                default\e[0m\r
+\e[2mprovider.insecure    false                default\e[0m\r
 \e[2mkeys."ctrl+@@"       newline              project\e[0m\r
 \e[2m\e[0m\r
 \e[2m.tug/config.toml:2:1: warning: no such setting ('nosuch')\e[0m\r

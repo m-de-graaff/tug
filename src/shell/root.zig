@@ -15,6 +15,7 @@ pub const core = @import("tugcore");
 pub const proto = @import("tugproto");
 
 pub const backend = @import("term/backend.zig");
+pub const auth = @import("auth.zig");
 pub const config = @import("config/load.zig");
 pub const caps = @import("term/caps.zig");
 pub const modes = @import("term/modes.zig");

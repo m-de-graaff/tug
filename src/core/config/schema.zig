@@ -172,12 +172,36 @@ pub const env_keys: []const EnvKey = &.{
     .{ .variable = "TUG_THEME", .key = "theme" },
     .{ .variable = "TUG_HISTORY", .key = "history.enabled" },
     .{ .variable = "TUG_HISTORY_MAX", .key = "history.max_entries" },
+    .{ .variable = "TUG_PROVIDER", .key = "provider.preset" },
+    .{ .variable = "TUG_MODEL", .key = "provider.model" },
+    // Deliberately absent: a `TUG_KEY`. A key belongs in the preset's own
+    // variable, where every provider's own documentation already puts it, and a
+    // second spelling is a second place to leak one from (`DR-024`).
 };
 
 pub const Config = struct {
     theme: Resolved([]const u8) = .{ .value = default_theme },
     history_enabled: Resolved(bool) = .{ .value = true },
     history_max_entries: Resolved(u32) = .{ .value = 1000 },
+
+    provider_preset: Resolved([]const u8) = .{ .value = "" },
+    provider_model: Resolved([]const u8) = .{ .value = "" },
+    /// A key written into a config file, which the documentation discourages
+    /// and this schema still supports: a user who has decided to do it will do
+    /// it with or without tug's blessing, and the alternative is a key exported
+    /// in a shell profile, which is not better.
+    ///
+    /// **Never printed.** `/config` shows `<set>` or `<unset>` and the layer,
+    /// and there is a canary test on exactly that surface.
+    provider_key: Resolved([]const u8) = .{ .value = "" },
+    /// `key_cmd = "pass show anthropic"`. Run once, cached for the process.
+    /// `DR-024` is why this exists and why a keychain integration does not.
+    provider_key_cmd: Resolved([]const u8) = .{ .value = "" },
+    /// The read timeout, which is also the stall detector's threshold.
+    provider_timeout_ms: Resolved(u32) = .{ .value = 60_000 },
+    /// Plaintext to a non-loopback host. Off, and a per-endpoint decision the
+    /// day endpoints are configurable one at a time.
+    provider_insecure: Resolved(bool) = .{ .value = false },
 
     binding_storage: [max_bindings]Binding = undefined,
     binding_count: usize = 0,
@@ -199,6 +223,12 @@ pub const Config = struct {
         theme: bool = false,
         history_enabled: bool = false,
         history_max_entries: bool = false,
+        provider_preset: bool = false,
+        provider_model: bool = false,
+        provider_key: bool = false,
+        provider_key_cmd: bool = false,
+        provider_timeout_ms: bool = false,
+        provider_insecure: bool = false,
     };
 
     /// Applies one file's worth of TOML as one layer.
@@ -297,6 +327,48 @@ pub const Config = struct {
             return self.unknown(.unknown_key, layer, pair.at, pair.key);
         }
 
+        if (eql(u8, pair.table, "provider")) {
+            if (eql(u8, pair.key, "preset")) {
+                if (pair.value != .string) return self.wrongType(layer, pair);
+                self.duplicate(layer, pair, &seen.provider_preset);
+                self.provider_preset.set(pair.value.string, layer);
+                return;
+            }
+            if (eql(u8, pair.key, "model")) {
+                if (pair.value != .string) return self.wrongType(layer, pair);
+                self.duplicate(layer, pair, &seen.provider_model);
+                self.provider_model.set(pair.value.string, layer);
+                return;
+            }
+            if (eql(u8, pair.key, "key")) {
+                if (pair.value != .string) return self.wrongType(layer, pair);
+                self.duplicate(layer, pair, &seen.provider_key);
+                self.provider_key.set(pair.value.string, layer);
+                return;
+            }
+            if (eql(u8, pair.key, "key_cmd")) {
+                if (pair.value != .string) return self.wrongType(layer, pair);
+                self.duplicate(layer, pair, &seen.provider_key_cmd);
+                self.provider_key_cmd.set(pair.value.string, layer);
+                return;
+            }
+            if (eql(u8, pair.key, "timeout_ms")) {
+                if (pair.value != .integer) return self.wrongType(layer, pair);
+                const ms = pair.value.integer;
+                if (ms < 0 or ms > std.math.maxInt(u32)) return self.wrongType(layer, pair);
+                self.duplicate(layer, pair, &seen.provider_timeout_ms);
+                self.provider_timeout_ms.set(@intCast(ms), layer);
+                return;
+            }
+            if (eql(u8, pair.key, "insecure")) {
+                if (pair.value != .boolean) return self.wrongType(layer, pair);
+                self.duplicate(layer, pair, &seen.provider_insecure);
+                self.provider_insecure.set(pair.value.boolean, layer);
+                return;
+            }
+            return self.unknown(.unknown_key, layer, pair.at, pair.key);
+        }
+
         self.unknown(.unknown_table, layer, pair.at, pair.table);
     }
 
@@ -332,6 +404,20 @@ pub const Config = struct {
             const value = std.fmt.parseInt(u32, text, 10) catch
                 return self.note(.{ .kind = .wrong_type, .layer = layer, .at = at, .text = key });
             self.history_max_entries.set(value, layer);
+            return;
+        }
+        if (eql(u8, key, "provider.preset")) {
+            self.provider_preset.set(text, layer);
+            return;
+        }
+        if (eql(u8, key, "provider.model")) {
+            self.provider_model.set(text, layer);
+            return;
+        }
+        if (eql(u8, key, "provider.timeout_ms")) {
+            const value = std.fmt.parseInt(u32, text, 10) catch
+                return self.note(.{ .kind = .wrong_type, .layer = layer, .at = at, .text = key });
+            self.provider_timeout_ms.set(value, layer);
             return;
         }
         self.note(.{ .kind = .unknown_key, .layer = layer, .at = at, .text = key });
@@ -441,6 +527,35 @@ pub const Config = struct {
             "history.max_entries",
             std.fmt.bufPrint(&number, "{d}", .{self.history_max_entries.value}) catch "?",
             self.history_max_entries.source,
+        );
+
+        try row(out, "provider.preset", self.provider_preset.value, self.provider_preset.source);
+        try row(out, "provider.model", self.provider_model.value, self.provider_model.source);
+
+        // Never the value. `/config` is the surface most likely to be pasted
+        // into an issue, and there is a canary test on this line.
+        try row(
+            out,
+            "provider.key",
+            if (self.provider_key.value.len == 0) "<unset>" else "<set>",
+            self.provider_key.source,
+        );
+        // The command is not a secret. It is the instruction for fetching one,
+        // and hiding it would make a misconfigured key_cmd undiagnosable.
+        try row(out, "provider.key_cmd", self.provider_key_cmd.value, self.provider_key_cmd.source);
+
+        var timeout: [16]u8 = undefined;
+        try row(
+            out,
+            "provider.timeout_ms",
+            std.fmt.bufPrint(&timeout, "{d}", .{self.provider_timeout_ms.value}) catch "?",
+            self.provider_timeout_ms.source,
+        );
+        try row(
+            out,
+            "provider.insecure",
+            if (self.provider_insecure.value) "true" else "false",
+            self.provider_insecure.source,
         );
 
         // Bindings come last and in the order they were collected, which is
@@ -682,9 +797,50 @@ test "the resolved report names every value's layer" {
         \\theme                light                user
         \\history.enabled      false                env
         \\history.max_entries  250                  user
+        \\provider.preset                           default
+        \\provider.model                            default
+        \\provider.key         <unset>              default
+        \\provider.key_cmd                          default
+        \\provider.timeout_ms  60000                default
+        \\provider.insecure    false                default
         \\keys."ctrl+j"        newline              project
         \\
     , writer.buffered());
+}
+
+test "the resolved report never prints the key" {
+    // `/config` is the surface most likely to be pasted into an issue. The
+    // canary is planted through the config layer here rather than through an
+    // auth path, because this is the output surface, and a redaction that only
+    // holds for one input is not a redaction.
+    var config: Config = .{};
+    config.apply(.user, "[provider]\nkey = \"sk-tug-canary-0000000000000000000000000000\"\n");
+    try testing.expectEqualStrings("sk-tug-canary-0000000000000000000000000000", config.provider_key.value);
+
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try config.write(&writer);
+
+    const printed = writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, printed, "sk-tug-canary") == null);
+    // And it still says that a key is set, and which layer set it — an absence
+    // that cannot be distinguished from a misconfiguration is not a redaction,
+    // it is a missing feature.
+    try testing.expect(std.mem.indexOf(u8, printed, "provider.key         <set>") != null);
+    try testing.expect(std.mem.indexOf(u8, printed, "user") != null);
+}
+
+test "a key_cmd is printed, because it is not the secret" {
+    // Hiding the instruction for fetching a key would make a misconfigured
+    // key_cmd undiagnosable, and the command line is not the thing worth hiding.
+    var config: Config = .{};
+    config.apply(.user, "[provider]\nkey_cmd = \"pass show anthropic\"\n");
+
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try config.write(&writer);
+
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "pass show anthropic") != null);
 }
 
 test "an untouched config reports every default as a default" {
@@ -698,6 +854,12 @@ test "an untouched config reports every default as a default" {
         \\theme                dark                 default
         \\history.enabled      true                 default
         \\history.max_entries  1000                 default
+        \\provider.preset                           default
+        \\provider.model                            default
+        \\provider.key         <unset>              default
+        \\provider.key_cmd                          default
+        \\provider.timeout_ms  60000                default
+        \\provider.insecure    false                default
         \\
     , writer.buffered());
 }
@@ -718,6 +880,12 @@ test "a value too wide for its column pushes the next one instead of being cut" 
         \\theme                a-theme-name-that-is-far-too-long-for-the-column user
         \\history.enabled      true                 default
         \\history.max_entries  1000                 default
+        \\provider.preset                           default
+        \\provider.model                            default
+        \\provider.key         <unset>              default
+        \\provider.key_cmd                          default
+        \\provider.timeout_ms  60000                default
+        \\provider.insecure    false                default
         \\
     , writer.buffered());
 }

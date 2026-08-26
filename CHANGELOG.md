@@ -28,6 +28,27 @@ older std, but a green gate had been proving less than it appeared to.
 
 ### Added
 
+**Failures are five words a user can act on.** 401 and 403 name the variable to
+export; 429 carries the wait the provider asked for, in either form the standard
+allows; a redirect or unparseable headers are `decode` rather than `transport`,
+because telling someone to check their network sends them after a problem that
+is not there. One file maps everything, because a taxonomy applied in two places
+is two taxonomies.
+
+**Retries, and the line they never cross** (`DR-019`). `transport` and `server`
+retry with jittered backoff; a 429 retries only when it says how long, because
+guessing is how a client becomes part of the incident; `auth` and `decode` never.
+And a request that has produced output is never retried: you keep what arrived
+and an error saying it ended early, rather than two model responses spliced
+together and presented as one.
+
+**Four places a key can come from** (`DR-024`): `--key`, the preset's environment
+variable, `provider.key`, and `provider.key_cmd = "pass show anthropic"` — run
+once and held for the process, so a secret can stay in whatever you already
+trust. A failing command shows its own stderr with anything key-shaped scrubbed
+out. `/config` prints `<set>` or `<unset>` and never the key; there is a test on
+that surface.
+
 **Two providers, streamed.** The Anthropic Messages API and the OpenAI
 chat-completions shape — the second covering Ollama, OpenRouter, Groq, vLLM and
 LM Studio from one implementation. Each is a pure request builder and a pure
