@@ -154,11 +154,15 @@ pub fn envVarFor(preset: []const u8) []const u8 {
     return entry.env_var;
 }
 
-/// The pieces a turn needs, sized once and owned by the caller's stack frame.
+/// The pieces a turn needs, sized once.
 ///
 /// A struct rather than locals because `Stream` borrows every one of them for
 /// its whole life, and a function returning a `Stream` built from its own locals
 /// would be returning pointers into a dead frame.
+///
+/// **Heap-allocated, not a local.** This is roughly 200 KiB and `build.zig` asks
+/// for a 1 MiB main thread stack; put it on the stack next to a DNS lookup and
+/// the process dies before it opens a socket. There is a size assertion below.
 const Turn = struct {
     scratch: [sse.recommended_scratch]u8 = undefined,
     data: [sse.recommended_data]u8 = undefined,
@@ -175,12 +179,27 @@ const Turn = struct {
 /// documented contract starts being true here.
 pub fn stream(
     gpa: std.mem.Allocator,
-    io: std.Io,
+    caller_io: std.Io,
     out: *std.Io.Writer,
     options: StreamOptions,
 ) !u8 {
+    // A real `Threaded`, not the caller's `init_single_threaded`.
+    //
+    // The standard library's HTTP client resolves a host through `io.async`,
+    // twice and nested — happy-eyeballs over a DNS lookup. A single-threaded `Io` cannot spawn, so
+    // it runs each of those inline, on *this* stack, on top of everything this
+    // function already holds. That is the second half of the stack overflow the
+    // first live run of `dev stream` hit; the first half was a megabyte of
+    // request buffer inside `Http`.
+    //
+    // Phase 7 inherits this: the shell's `Io` is single-threaded too, and the
+    // provider thread will need its own.
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    var stderr_file: std.Io.File.Writer = .init(.stderr(), caller_io, &stderr_buffer);
     const notices = &stderr_file.interface;
 
     const entry = providers.preset.find(options.preset) orelse {
@@ -207,7 +226,10 @@ pub fn stream(
         return auth_exit_code;
     }
 
-    var turn: Turn = .{};
+    // Heap, not stack. See `Turn`.
+    const turn = try gpa.create(Turn);
+    defer gpa.destroy(turn);
+    turn.* = .{};
 
     const message_content = [_]proto.Content{.{ .text = options.prompt }};
     const messages = [_]proto.Message{.{ .role = .user, .content = &message_content }};
@@ -246,7 +268,9 @@ pub fn stream(
         },
     }
 
-    var client: providers.http.Http = .init(gpa, io, .{
+    const client = try gpa.create(providers.http.Http);
+    defer gpa.destroy(client);
+    client.* = .init(gpa, io, .{
         .debug_wire = if (options.debug_wire) notices else null,
     });
     defer client.deinit();
@@ -272,6 +296,12 @@ pub fn stream(
         },
         &turn.read_buffer,
     );
+    // So an `auth` failure names the variable this preset reads, and a dated
+    // `Retry-After` can be turned into a wait. The seam takes both rather than
+    // reading a clock, because everything above it is a pure function of bytes.
+    turn_stream.env_var = entry.env_var;
+    turn_stream.now_epoch_s = std.Io.Clock.real.now(io).toSeconds();
+
     const transport = client.transport();
     defer transport.close();
 
@@ -338,6 +368,15 @@ pub fn drain(
 }
 
 const testing = std.testing;
+
+test "a turn's buffers do not go on a 1 MiB stack" {
+    // `build.zig` asks for a 1 MiB main thread stack, and the HTTP client's DNS
+    // path nests two inline `io.async` frames on top of whatever the caller
+    // already holds. The first live run of `dev stream` died here; the assertion is what
+    // notices if a buffer grows back.
+    try testing.expect(@sizeOf(Turn) > 64 * 1024); // it really is large
+    try testing.expect(@sizeOf(providers.http.Http) <= 64 * 1024); // and this one is not
+}
 
 test "an event renders as one line with its newlines escaped" {
     var buffer: [256]u8 = undefined;
@@ -487,7 +526,10 @@ test "a failed turn exits with the code for its error kind" {
     var mapper_state: providers.anthropic_map.Anthropic = .init(testing.allocator);
     defer mapper_state.deinit();
 
-    var turn: Turn = .{};
+    // Heap in the test too, for the same reason and so the shapes match.
+    const turn = try testing.allocator.create(Turn);
+    defer testing.allocator.destroy(turn);
+    turn.* = .{};
     turn.parser = .init(&turn.scratch, &turn.data);
     var s: providers.stream.Stream = .init(
         f.transport(),

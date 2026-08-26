@@ -50,13 +50,16 @@ pub const Options = struct {
 
 /// The largest request body tug will send.
 ///
-/// `sendBodyComplete` wants a mutable slice, so the body is copied into a
-/// buffer this type owns. A megabyte is a very long conversation — roughly
-/// 250k tokens of text, past every context window this version knows about.
+/// A megabyte is a very long conversation — roughly 250k tokens of text, past
+/// every context window this version knows about. A request larger than this
+/// fails rather than truncating: a silently shortened prompt means the model
+/// answers a question nobody asked.
 ///
-/// ponytail: fixed cap, and a longer conversation fails with OutOfMemory rather
-/// than truncating. Allocate from the caller's arena instead if v0.4's sessions
-/// ever want to replay something larger.
+/// This is a limit, not a buffer. It used to be `body_storage: [max_body_bytes]u8`
+/// inline in `Http`, which made the struct 1.07 MiB — larger than the 1 MiB main
+/// thread stack `build.zig` asks for, so `tug dev stream` overflowed the stack
+/// before it opened a socket. Every test missed it because a test binary gets an
+/// 8 MiB stack. `sizeOf` is now asserted below.
 pub const max_body_bytes = 1024 * 1024;
 
 /// Header values that are safe to print in a wire dump.
@@ -121,7 +124,10 @@ pub const Http = struct {
     head_storage: [512]u8 = undefined,
     head_used: usize = 0,
 
-    body_storage: [max_body_bytes]u8 = undefined,
+    /// The request body, copied because `sendBodyComplete` wants a mutable
+    /// slice, and heap-allocated because a request-sized buffer has no business
+    /// being part of a stack-allocated struct.
+    body_copy: []u8 = &.{},
     transfer_buffer: [16 * 1024]u8 = undefined,
     redirect_buffer: [1024]u8 = undefined,
 
@@ -228,7 +234,7 @@ pub const Http = struct {
             return error.Refused;
         }
 
-        if (request.body.len > self.body_storage.len) return error.OutOfMemory;
+        if (request.body.len > max_body_bytes) return error.OutOfMemory;
 
         if (self.options.debug_wire) |out| writeWire(request, out) catch {};
 
@@ -242,6 +248,12 @@ pub const Http = struct {
         // gives the connect timeout a life of its own — and the pool is keyed on
         // host and port, so a second turn to the same endpoint finds this
         // connection rather than handshaking again.
+        //
+        // It also skips the certificate-bundle scan that `request` performs, and
+        // the TLS path unwraps `client.now` unconditionally. Bypassing one and
+        // not the other panicked on the first live HTTPS request — plain HTTP to
+        // loopback was fine, which is exactly why the tests missed it.
+        try ensureCertBundle(client, protocol);
         const connection = client.connectTcpOptions(.{
             .host = host,
             // `Protocol.port()` is not public, so the two default ports are
@@ -288,8 +300,11 @@ pub const Http = struct {
         req.accept_encoding = @splat(false);
         req.accept_encoding[@intFromEnum(std.http.ContentEncoding.identity)] = true;
 
-        @memcpy(self.body_storage[0..request.body.len], request.body);
-        req.sendBodyComplete(self.body_storage[0..request.body.len]) catch return error.Closed;
+        // Freed by `close`, which every caller reaches through `defer`.
+        self.gpa.free(self.body_copy);
+        self.body_copy = self.gpa.alloc(u8, request.body.len) catch return error.OutOfMemory;
+        @memcpy(self.body_copy, request.body);
+        req.sendBodyComplete(self.body_copy) catch return error.Closed;
 
         self.response = req.receiveHead(&self.redirect_buffer) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
@@ -345,6 +360,38 @@ pub const Http = struct {
         self.watchdog = std.Thread.spawn(.{}, watch, .{self}) catch null;
 
         return out;
+    }
+
+    /// Loads the system certificate bundle, as `std.http.Client.request` would.
+    ///
+    /// Mirrored rather than avoided: the standard library's own connect path
+    /// checks `client.now != null` before rescanning, which is what makes a
+    /// caller populating it ahead of time the supported arrangement rather than
+    /// a trick. Doing it here means the scan still happens on first use and not
+    /// at startup, which is what `DR-017`'s laziness rule asks for.
+    fn ensureCertBundle(client: *std.http.Client, protocol: std.http.Client.Protocol) seam.Error!void {
+        if (protocol != .tls) return;
+
+        const io = client.io;
+        {
+            client.ca_bundle_lock.lockShared(io) catch return error.Canceled;
+            defer client.ca_bundle_lock.unlockShared(io);
+            if (client.now != null) return;
+        }
+
+        var bundle: std.crypto.Certificate.Bundle = .empty;
+        defer bundle.deinit(client.allocator);
+
+        const now = std.Io.Clock.real.now(io);
+        bundle.rescan(client.allocator, io, now) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.Tls,
+        };
+
+        client.ca_bundle_lock.lock(io) catch return error.Canceled;
+        defer client.ca_bundle_lock.unlock(io);
+        client.now = now;
+        std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
     }
 
     fn readErased(context: ?*anyopaque, buffer: []u8) seam.Error!usize {
@@ -403,6 +450,9 @@ pub const Http = struct {
         if (self.request) |*req| req.deinit();
         self.request = null;
         self.head_used = 0;
+
+        self.gpa.free(self.body_copy);
+        self.body_copy = &.{};
     }
 
     fn closeErased(context: ?*anyopaque) void {
@@ -501,6 +551,61 @@ test "a body larger than the cap fails rather than truncating" {
         seam.Error.OutOfMemory,
         t.send(.{ .url = "http://127.0.0.1:11434/v1/chat/completions", .body = huge }),
     );
+}
+
+test "the client fits on a thread's stack" {
+    // `build.zig` gives the main thread 1 MiB, and this type used to be 1.07 MiB
+    // because the request body was an inline array. `tug dev stream` overflowed
+    // the stack before it opened a socket, and every test missed it: a test
+    // binary gets an 8 MiB stack, so the only build that could fail was the one
+    // nobody ran under test.
+    //
+    // 64 KiB is far more headroom than the transfer buffer needs and far less
+    // than anything that would blow a stack.
+    try testing.expect(@sizeOf(Http) <= 64 * 1024);
+}
+
+test "a body larger than one request is not carried between requests" {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    var client: Http = .init(testing.allocator, threaded.io(), .{});
+    defer client.deinit();
+
+    // Nothing allocated before a send, and nothing left over after a close.
+    try testing.expectEqual(@as(usize, 0), client.body_copy.len);
+    const t = client.transport();
+    t.close();
+    try testing.expectEqual(@as(usize, 0), client.body_copy.len);
+}
+
+test "a TLS request loads the certificate bundle before it connects" {
+    // The regression test for the panic the first live HTTPS request hit:
+    // `connectTcpOptions` skips the scan `request` does, and std's TLS path
+    // unwraps `client.now` with no check. Reads the filesystem and no socket, so
+    // it runs inside the network-denied namespace like everything else.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var client: Http = .init(testing.allocator, threaded.io(), .{});
+    defer client.deinit();
+    client.client = .{ .allocator = testing.allocator, .io = threaded.io() };
+
+    try Http.ensureCertBundle(&client.client.?, .tls);
+    try testing.expect(client.client.?.now != null);
+
+    // And it is idempotent: a second turn must not rescan.
+    const first = client.client.?.now.?;
+    try Http.ensureCertBundle(&client.client.?, .tls);
+    try testing.expectEqual(first.nanoseconds, client.client.?.now.?.nanoseconds);
+}
+
+test "a plaintext request does not load a certificate bundle" {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    var client: Http = .init(testing.allocator, threaded.io(), .{});
+    defer client.deinit();
+    client.client = .{ .allocator = testing.allocator, .io = threaded.io() };
+
+    try Http.ensureCertBundle(&client.client.?, .plain);
+    try testing.expect(client.client.?.now == null);
 }
 
 test "construction opens nothing" {
