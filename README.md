@@ -72,6 +72,8 @@ setting, every action, every theme slot.
 | | |
 |---|---|
 | [docs/configuration.md](docs/configuration.md) | Settings, keybinds, themes |
+| [docs/providers.md](docs/providers.md) | Keys, presets, plaintext policy, caching |
+| [docs/endpoint-smoke.md](docs/endpoint-smoke.md) | Which real endpoints have been streamed from, and when |
 | [docs/architecture.md](docs/architecture.md) | The loop, the tail, the block model |
 | [docs/terminal-matrix.md](docs/terminal-matrix.md) | What has been run where, and what has not |
 | [docs/decisions/](docs/decisions/) | Every non-obvious choice, with its rejected alternatives |

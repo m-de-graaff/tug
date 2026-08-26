@@ -1,0 +1,9 @@
+{"type":"usage","input_tokens":31,"output_tokens":1,"cache_read_tokens":0,"cache_creation_tokens":0}
+{"type":"tool_call_delta","id":"toolu_01Bollard","name":"read","arguments":""}
+{"type":"tool_call_delta","id":"toolu_01Bollard","name":"","arguments":"{\"pa"}
+{"type":"tool_call_delta","id":"toolu_01Bollard","name":"","arguments":"th\": \"/etc"}
+{"type":"tool_call_delta","id":"toolu_01Bollard","name":"","arguments":"/hosts\""}
+{"type":"tool_call_delta","id":"toolu_01Bollard","name":"","arguments":", \"limit\":"}
+{"type":"tool_call_delta","id":"toolu_01Bollard","name":"","arguments":" 10}"}
+{"type":"usage","input_tokens":31,"output_tokens":42,"cache_read_tokens":0,"cache_creation_tokens":0}
+{"type":"stop","reason":"tool_use"}

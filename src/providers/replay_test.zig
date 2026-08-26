@@ -53,6 +53,13 @@ const corpus = [_]Case{
         .expected = @embedFile("error-401.ndjson"),
     },
     .{
+        .name = "anthropic/tool-call-turn",
+        .shape = .anthropic,
+        .head = @embedFile("tool-call-turn.head"),
+        .body = @embedFile("tool-call-turn.sse"),
+        .expected = @embedFile("tool-call-turn.ndjson"),
+    },
+    .{
         .name = "openai/clean-turn",
         .shape = .openai,
         .head = @embedFile("openai-clean-turn.head"),
@@ -168,7 +175,7 @@ test "replay: the corpus covers both shapes and both outcomes" {
         if (std.mem.indexOf(u8, case.expected, "\"error\"") != null) error_cases += 1;
     }
 
-    try testing.expect(anthropic_cases >= 2);
+    try testing.expect(anthropic_cases >= 3);
     try testing.expect(openai_cases >= 3);
     try testing.expect(error_cases >= 2);
 }

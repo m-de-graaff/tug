@@ -81,6 +81,7 @@ const Command = enum {
     debug_config,
     debug_first_paint,
     dev_sse_dump,
+    dev_stream,
     mock,
     shell,
 };
@@ -101,6 +102,9 @@ const Options = struct {
     /// `--theme <name>`, applied at the `flag` layer by the config load.
     /// Borrowed from `argv`, which outlives every use of it.
     theme: ?[]const u8 = null,
+    /// Everything `tug dev stream` needs except the key, which comes from the
+    /// environment and so cannot be parsed out of `argv`.
+    dev_stream: shell.dev.StreamOptions = .{},
 };
 
 /// A shell may run for hours, so a release build gets `smp_allocator` and pays
@@ -178,6 +182,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
             const code = try shell.dev.sseDump(io, stdout);
             if (code != 0) std.process.exit(code);
+            return;
+        },
+        .dev_stream => {
+            if (builtin.mode != .Debug) {
+                try stdout.writeAll("tug: dev subcommands are debug builds only\n");
+                try stdout.flush();
+                return error.DevBuildOnly;
+            }
+
+            var options_with_key = options.dev_stream;
+            options_with_key.key = providerKey(
+                init.environ,
+                environment_allocator.allocator(),
+                options.dev_stream.preset,
+            );
+
+            const code = try shell.dev.stream(sessionAllocator(), io, stdout, options_with_key);
+            const leaked = reportLeaks();
+            if (code != 0 or leaked != 0) std.process.exit(if (code != 0) code else leaked);
             return;
         },
         .debug_config => {
@@ -298,6 +321,44 @@ fn parseArgs(argv: []const [:0]const u8) Options {
         if (eqlAny(arg, &.{"dev"})) {
             if (value) |name| {
                 if (std.mem.eql(u8, name, "sse-dump")) return .{ .command = .dev_sse_dump };
+                if (std.mem.eql(u8, name, "stream")) {
+                    options.command = .dev_stream;
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
+        if (options.command == .dev_stream) {
+            if (eqlAny(arg, &.{"--preset"})) {
+                if (value) |name| options.dev_stream.preset = name;
+                index += 1;
+                continue;
+            }
+            if (eqlAny(arg, &.{"--model"})) {
+                if (value) |name| options.dev_stream.model = name;
+                index += 1;
+                continue;
+            }
+            if (eqlAny(arg, &.{"--system"})) {
+                if (value) |text| options.dev_stream.system = text;
+                index += 1;
+                continue;
+            }
+            if (eqlAny(arg, &.{"--json"})) {
+                options.dev_stream.json = true;
+                continue;
+            }
+            if (eqlAny(arg, &.{"--debug-wire"})) {
+                options.dev_stream.debug_wire = true;
+                continue;
+            }
+            // The first bare word after the subcommand is the prompt. Anything
+            // starting with a dash is a flag this build does not know, and
+            // treating it as a prompt would send it to a model.
+            if (!std.mem.startsWith(u8, arg, "-") and options.dev_stream.prompt.len == 0) {
+                options.dev_stream.prompt = arg;
+                continue;
             }
         }
         // Set rather than returned, unlike the four above it: this is the one
@@ -384,6 +445,19 @@ const Environment = struct {
     /// variable's spelling — the table is the mapping and the only mapping.
     config_env: [core.config.env_keys.len]?[]const u8 = @splat(null),
 };
+
+/// The API key for a preset, read from the one environment variable it names.
+///
+/// The whole auth story in v0.2's Phase 4: flag, config and `key_cmd` arrive in
+/// Phase 5. Returns empty rather than an error — a missing key is a message with
+/// an export line in it, not a failure the caller has to unpick.
+fn providerKey(environ: std.process.Environ, gpa: std.mem.Allocator, preset: []const u8) []const u8 {
+    const name = shell.dev.envVarFor(preset);
+    if (name.len == 0) return "";
+
+    var map = environ.createMap(gpa) catch return "";
+    return map.get(name) orelse "";
+}
 
 /// Reads the environment into the pure values the detector, the history and the
 /// config want.

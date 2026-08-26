@@ -28,6 +28,33 @@ older std, but a green gate had been proving less than it appeared to.
 
 ### Added
 
+**Two providers, streamed.** The Anthropic Messages API and the OpenAI
+chat-completions shape — the second covering Ollama, OpenRouter, Groq, vLLM and
+LM Studio from one implementation. Each is a pure request builder and a pure
+mapper, so the entire path from request bytes to `StreamEvent`s runs in CI from
+recorded responses with no socket anywhere.
+
+Prompt caching is on and has no knobs (`DR-022`). Tool calls are parsed and not
+executed, with one notice per turn saying so — v0.3 is where the model gets
+hands.
+
+**`tug dev stream`** (debug builds only) streams one real turn from one real
+endpoint. Model text on stdout, every diagnostic on stderr, `--json` for ndjson
+`StreamEvent`s — the same bytes Phase 8's `--json` will print. It is also the
+first thing in tug shaped like the pipe frontend: no termios, no probes, no
+protocol modes.
+
+**The replay proof.** `zig build replay` runs every recorded response through the
+whole provider stack and compares the emitted ndjson byte for byte, at five chunk
+sizes down to one byte at a time. The roadmap's exit criterion, as a job name
+rather than a sentence.
+
+Binary size at the end of M2: **220,832 B**, against the 2 MiB ceiling. Lower
+than it will be: `tug dev stream` is the only caller of the transport and it is
+debug-only, so the release binary still discards TLS as dead code. The number
+that the v0.2 ratchet is derived from is the one measured at the tag, after
+Phase 7 puts a provider in the shell.
+
 **A stream can be stopped.** `Esc` and a read timeout are the same physical
 problem — a thread parked in a read that something outside it has decided should
 end — so they get one mechanism: an atomic flag plus `shutdown(2)` on the socket,

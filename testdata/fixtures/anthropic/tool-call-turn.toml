@@ -1,0 +1,15 @@
+endpoint = "https://api.anthropic.com/v1/messages"
+model = "claude-sonnet-4-5"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; body written by hand, response side only"
+note = """
+A turn whose only content block is a tool_use, with its argument JSON streamed
+across five input_json_delta fragments and a stop_reason of tool_use.
+
+Two things this fixture is the only proof of. The first is that a continuation
+fragment carries no id on the wire and the mapper is what remembers it — every
+fragment after the opening one here would otherwise have nowhere to belong. The
+second is the once-per-turn notice: v0.2 parses tool calls and does not execute
+them, and a frontend that said so once per fragment would print it five times.
+"""

@@ -152,6 +152,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("testdata/fixtures/openai/error-404-model.ndjson"),
     });
 
+    providers.addAnonymousImport("tool-call-turn.head", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/tool-call-turn.head"),
+    });
+    providers.addAnonymousImport("tool-call-turn.sse", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/tool-call-turn.sse"),
+    });
+    providers.addAnonymousImport("tool-call-turn.ndjson", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/tool-call-turn.ndjson"),
+    });
+
     const shell = b.addModule("tugshell", .{
         .root_source_file = b.path("src/shell/root.zig"),
         .target = target,
@@ -161,6 +171,19 @@ pub fn build(b: *std.Build) void {
             .{ .name = "tugproviders", .module = providers },
         },
     });
+
+    // `tug dev stream` replays the same recordings the provider tests do, so
+    // the frontend's behaviour on a tool-call turn is pinned by the same bytes.
+    for ([_][]const u8{
+        "clean-turn.head",
+        "clean-turn.sse",
+        "tool-call-turn.head",
+        "tool-call-turn.sse",
+    }) |name| {
+        shell.addAnonymousImport(name, .{
+            .root_source_file = b.path(b.fmt("testdata/fixtures/anthropic/{s}", .{name})),
+        });
+    }
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
