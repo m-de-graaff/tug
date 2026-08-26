@@ -302,15 +302,29 @@ pub fn build(b: *std.Build) void {
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
+    const wasm_module = b.createModule(.{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "tugproto", .module = wasm_proto },
+            .{ .name = "build_options", .module = build_options },
+        },
+    });
+
+    // Built from a root that forces every declaration to be analysed, rather
+    // than from `tugcore` directly. Zig analyses lazily, so an object with no
+    // entry point reaches almost nothing: before this, `std.Thread` inside a
+    // function nobody called kept the job green. See `src/core/wasm_check.zig`.
     const wasm_core = b.addObject(.{
         .name = "tugcore-wasm",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/core/root.zig"),
+            .root_source_file = b.path("src/core/wasm_check.zig"),
             .target = wasm_target,
             .optimize = .ReleaseSmall,
             .imports = &.{
+                .{ .name = "tugcore", .module = wasm_module },
                 .{ .name = "tugproto", .module = wasm_proto },
-                .{ .name = "build_options", .module = build_options },
             },
         }),
     });
