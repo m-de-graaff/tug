@@ -28,6 +28,14 @@ older std, but a green gate had been proving less than it appeared to.
 
 ### Added
 
+**A stream can be stopped.** `Esc` and a read timeout are the same physical
+problem — a thread parked in a read that something outside it has decided should
+end — so they get one mechanism: an atomic flag plus `shutdown(2)` on the socket,
+with a watchdog pulling the same lever when no byte has arrived for the read
+timeout. Cancel to thread-join is bounded at 100 ms and tested against a real
+loopback server. `DR-018` has the argument, including why `Io`'s own
+cancellation is the right answer for a program tug is not.
+
 **The provider layer can open a socket.** `std.http.Client` over the standard
 library's TLS 1.3, confined to `src/providers/transport` by `DR-016` and reached
 only through the three-function seam of `DR-017`. Four policies ride with it, and

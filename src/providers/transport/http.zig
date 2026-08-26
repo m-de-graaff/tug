@@ -125,6 +125,24 @@ pub const Http = struct {
     transfer_buffer: [16 * 1024]u8 = undefined,
     redirect_buffer: [1024]u8 = undefined,
 
+    /// Set from any thread by `cancel`. Checked between reads, and backed by a
+    /// socket shutdown so a thread already parked in one wakes too (`DR-018`).
+    canceled: std.atomic.Value(bool) = .init(false),
+    /// Set by the watchdog when it shuts the socket down for a stall, so the
+    /// reader can tell `Timeout` from `Canceled` once it wakes. "The model
+    /// stopped talking" and "you pressed Esc" must not render the same.
+    stalled: std.atomic.Value(bool) = .init(false),
+    /// Milliseconds on the monotonic clock at the last byte read. The reader
+    /// writes it; the watchdog reads it.
+    last_byte_ms: std.atomic.Value(i64) = .init(0),
+    watchdog: ?std.Thread = null,
+    /// A u32 rather than a bool so the watchdog can wait on it: it parks on a
+    /// futex with a tick-length timeout instead of sleeping the tick out, which
+    /// is what keeps `close` from having to wait a quarter second for a thread
+    /// that has nothing left to do. `DR-018` puts a 100 ms bound on the whole
+    /// teardown, and a 250 ms sleep would blow it on its own.
+    watchdog_stop: std.atomic.Value(u32) = .init(0),
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, options: Options) Http {
         return .{ .gpa = gpa, .io = io, .options = options };
     }
@@ -143,6 +161,56 @@ pub const Http = struct {
         @memcpy(slot, text[0..take]);
         self.head_used += take;
         return slot;
+    }
+
+    /// Ends the stream early, from any thread. Idempotent, and safe when no
+    /// request is in flight — the frontend does not get to know whether the
+    /// provider thread has reached its first read yet.
+    pub fn cancel(self: *Http) void {
+        self.canceled.store(true, .release);
+        self.shutdownSocket();
+    }
+
+    /// Wakes a thread parked in a read without retiring the descriptor.
+    ///
+    /// `shutdown` rather than `close`: closing hands the fd back to the OS while
+    /// the client's connection pool still believes it owns it, and the next
+    /// connection may be handed the same number. `DR-018` has the rest.
+    fn shutdownSocket(self: *Http) void {
+        const req = self.request orelse return;
+        const connection = req.connection orelse return;
+        connection.stream_reader.stream.shutdown(self.io, .both) catch {};
+    }
+
+    /// Monotonic milliseconds. The absolute value is meaningless — the clock
+    /// counts from an unspecified point — and only the difference between two
+    /// of these is ever read, which is the whole reason it is the awake clock
+    /// and not the wall clock.
+    fn nowMs(io: std.Io) i64 {
+        const timestamp: std.Io.Clock.Timestamp = .now(io, .awake);
+        return timestamp.raw.toMilliseconds();
+    }
+
+    /// ponytail: one thread per active stream, waking four times a second. tug
+    /// has one active stream, so this costs one thread and four wakeups per
+    /// second. A single shared watchdog over a list of deadlines is the upgrade
+    /// the day parallel streams exist.
+    fn watch(self: *Http) void {
+        const tick_ms = 250;
+        while (self.watchdog_stop.load(.acquire) == 0) {
+            self.io.futexWaitTimeout(u32, &self.watchdog_stop.raw, 0, .{ .duration = .{
+                .raw = .fromMilliseconds(tick_ms),
+                .clock = .awake,
+            } }) catch return;
+            if (self.watchdog_stop.load(.acquire) != 0) return;
+
+            const idle = nowMs(self.io) - self.last_byte_ms.load(.acquire);
+            if (idle < self.options.read_ms) continue;
+
+            self.stalled.store(true, .release);
+            self.shutdownSocket();
+            return;
+        }
     }
 
     fn sendErased(context: ?*anyopaque, request: seam.Request) seam.Error!seam.Head {
@@ -269,6 +337,13 @@ pub const Http = struct {
         }
 
         self.body = self.response.reader(&self.transfer_buffer);
+
+        // The clock starts at the head, not at the first body byte: a provider
+        // that sends a head and then nothing is exactly the stall this detects.
+        self.last_byte_ms.store(nowMs(self.io), .release);
+        self.watchdog_stop.store(0, .release);
+        self.watchdog = std.Thread.spawn(.{}, watch, .{self}) catch null;
+
         return out;
     }
 
@@ -276,14 +351,54 @@ pub const Http = struct {
         const self: *Http = @ptrCast(@alignCast(context.?));
         const body = self.body orelse return 0;
 
-        return body.readSliceShort(buffer) catch |err| switch (err) {
-            error.ReadFailed => error.Closed,
-        };
+        // Deliberately not `readSliceShort`, and deliberately not `readVec`.
+        //
+        // `readSliceShort` is short only at end of stream: it loops until the
+        // caller's buffer is full, so the first token of a response would
+        // appear once 4 KiB of deltas had piled up behind it, or never.
+        //
+        // `readVec` does one underlying read, but it fills the body reader's
+        // own buffer first and reports only what landed in the caller's — which
+        // for a small chunked event is zero, with the bytes sitting in the
+        // reader where the caller cannot see them.
+        //
+        // What streaming actually wants: hand back whatever is buffered, and
+        // block for more only when there is nothing.
+        while (true) {
+            if (self.canceled.load(.acquire)) return error.Canceled;
+
+            const available = body.buffered();
+            if (available.len > 0) {
+                const take = @min(available.len, buffer.len);
+                @memcpy(buffer[0..take], available[0..take]);
+                body.toss(take);
+                self.last_byte_ms.store(nowMs(self.io), .release);
+                return take;
+            }
+
+            body.fillMore() catch |err| switch (err) {
+                error.EndOfStream => return 0,
+                // The read failed; which failure it was is the flags' job to
+                // say. A shutdown from another thread and a server hanging up
+                // look identical from in here, and they read very differently
+                // to a user.
+                error.ReadFailed => {
+                    if (self.canceled.load(.acquire)) return error.Canceled;
+                    if (self.stalled.load(.acquire)) return error.Timeout;
+                    return error.Closed;
+                },
+            };
+        }
     }
 
     fn closeErasedSelf(self: *Http) void {
         // Idempotent, and safe after an error: `defer t.close()` is the only
         // cleanup pattern the seam gives its callers.
+        self.watchdog_stop.store(1, .release);
+        self.io.futexWake(u32, &self.watchdog_stop.raw, 1);
+        if (self.watchdog) |thread| thread.join();
+        self.watchdog = null;
+
         self.body = null;
         if (self.request) |*req| req.deinit();
         self.request = null;
@@ -435,4 +550,263 @@ test "debug-wire never prints a key, not even a header nobody listed" {
     try testing.expect(std.mem.indexOf(u8, out.written(), "x-tug-future-auth") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "application/json") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "<redacted, 42 bytes>") != null);
+}
+
+// --- the loopback server the cancellation tests need ---------------------
+//
+// A fixture cannot block, and blocking is the entire subject of `DR-018`. So
+// these tests need a real socket — which is why `scripts/offline.sh` brings
+// loopback up inside its network-denied namespace rather than denying every
+// interface. A test server is network code and lives where network code lives.
+
+const TestServer = struct {
+    io: std.Io,
+    server: std.Io.net.Server,
+    port: u16,
+    thread: ?std.Thread = null,
+    stop: std.atomic.Value(bool) = .init(false),
+    /// How many connections were accepted. The connection-reuse test is the
+    /// only thing that reads it, and it is the only way to observe pooling.
+    accepted: std.atomic.Value(usize) = .init(0),
+    /// Answer this many requests before going quiet.
+    responses: usize = 1,
+    /// After the head and the first event, say nothing more instead of ending
+    /// the response. This is the stall, reproducibly.
+    go_silent: bool = true,
+
+    const event = "event: chunk\ndata: hello\n\n";
+
+    fn start(io: std.Io, options: struct { responses: usize = 1, go_silent: bool = true }) !*TestServer {
+        const self = try testing.allocator.create(TestServer);
+        errdefer testing.allocator.destroy(self);
+
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+        const server = try address.listen(io, .{ .reuse_address = true });
+        self.* = .{
+            .io = io,
+            .server = server,
+            .port = server.socket.address.getPort(),
+            .responses = options.responses,
+            .go_silent = options.go_silent,
+        };
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+        return self;
+    }
+
+    /// Accepts exactly one connection and answers `responses` requests on it.
+    ///
+    /// One accept, not one per response, and that is the point: keep-alive
+    /// means the second request arrives on the first connection, so a server
+    /// that accepted twice would be measuring nothing. It also means this
+    /// thread never parks in a second `accept` that nothing will ever satisfy,
+    /// which is what a `deinit` has to be able to join.
+    ///
+    /// Built on `std.http.Server` rather than by hand. The first version of
+    /// this wrote the status line and the chunked framing itself and spent an
+    /// afternoon failing for reasons that had nothing to do with `DR-018`; a
+    /// test server whose own framing is under suspicion tests nothing.
+    fn serve(self: *TestServer) void {
+        var stream = self.server.accept(self.io) catch return;
+        defer stream.close(self.io);
+        _ = self.accepted.fetchAdd(1, .monotonic);
+
+        var read_buffer: [4096]u8 = undefined;
+        var reader = stream.reader(self.io, &read_buffer);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = stream.writer(self.io, &write_buffer);
+
+        var http_server = std.http.Server.init(&reader.interface, &writer.interface);
+
+        var served: usize = 0;
+        while (served < self.responses and !self.stop.load(.acquire)) : (served += 1) {
+            var request = http_server.receiveHead() catch return;
+
+            var body_buffer: [1024]u8 = undefined;
+            var body = request.respondStreaming(&body_buffer, .{ .respond_options = .{
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/event-stream" }},
+            } }) catch return;
+
+            body.writer.writeAll(event) catch return;
+            // Two flushes, and both are load-bearing. `BodyWriter.flush` only
+            // flushes the protocol output; the bytes the caller wrote are
+            // sitting in the BodyWriter's own buffer until `body.writer.flush`
+            // turns them into a chunk. Skip the first and the event never
+            // leaves the process — and every test here then measures a stall it
+            // caused itself.
+            body.writer.flush() catch return;
+            body.flush() catch return;
+
+            if (self.go_silent) break;
+            body.end() catch return;
+        }
+
+        // Hold the connection open, saying nothing, until the test is done with
+        // it. For `go_silent` this *is* the stall — a provider that is alive and
+        // not talking. For the others it keeps the pooled connection valid.
+        while (!self.stop.load(.acquire)) {
+            self.io.sleep(.fromMilliseconds(10), .awake) catch return;
+        }
+    }
+
+    fn url(self: *TestServer, buffer: []u8) []const u8 {
+        return std.fmt.bufPrint(buffer, "http://127.0.0.1:{d}/v1/messages", .{self.port}) catch unreachable;
+    }
+
+    fn deinit(self: *TestServer) void {
+        self.stop.store(true, .release);
+
+        // Wake a thread parked in `accept`. It is parked there whenever the
+        // test failed before connecting, and closing the listening socket from
+        // another thread is not guaranteed to return it — a connection is. A
+        // test that fails should fail, not hang.
+        if (self.accepted.load(.acquire) == 0) {
+            const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(self.port) };
+            if (address.connect(self.io, .{ .mode = .stream })) |stream| {
+                stream.close(self.io);
+            } else |_| {}
+        }
+
+        if (self.thread) |thread| thread.join();
+        self.server.deinit(self.io);
+        testing.allocator.destroy(self);
+    }
+};
+
+/// Drains a whole turn, recording how far it got before whatever ended it.
+fn drain(client: *Http, url: []const u8, out: *DrainResult) seam.Error!void {
+    const t = client.transport();
+    defer t.close();
+
+    _ = t.send(.{ .url = url }) catch |err| {
+        out.send_failed = true;
+        return err;
+    };
+
+    var buffer: [256]u8 = undefined;
+    while (true) {
+        const n = try t.read(&buffer);
+        out.reads += 1;
+        if (n == 0) {
+            out.ended_clean = true;
+            return;
+        }
+    }
+}
+
+const DrainResult = struct {
+    err: ?seam.Error = null,
+    elapsed_ms: i64 = 0,
+    /// Which half failed, and how far it got. A test that only knows the error
+    /// cannot tell "the request never left" from "the read woke wrong", and
+    /// those have nothing to do with each other.
+    send_failed: bool = false,
+    reads: usize = 0,
+    ended_clean: bool = false,
+};
+
+fn drainTimed(client: *Http, url: []const u8, out: *DrainResult) void {
+    const started = Http.nowMs(client.io);
+    drain(client, url, out) catch |err| {
+        out.err = err;
+    };
+    out.elapsed_ms = Http.nowMs(client.io) - started;
+}
+
+test "cancel wakes a blocked read within the bound" {
+    // A real `Threaded`, not `init_single_threaded`: three threads are in
+    // flight here — the reader, the server and the watchdog — and the
+    // single-threaded instance is documented for a program that has one.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const server = try TestServer.start(io, .{});
+    defer server.deinit();
+
+    var url_buffer: [64]u8 = undefined;
+    const url = server.url(&url_buffer);
+
+    var client: Http = .init(testing.allocator, io, .{});
+    defer client.deinit();
+
+    var result: DrainResult = .{};
+    const reader = try std.Thread.spawn(.{}, drainTimed, .{ &client, url, &result });
+
+    // Let it get all the way into the blocked read, which is the only state
+    // where cancelling is interesting.
+    try io.sleep(.fromMilliseconds(50), .awake);
+    const canceled_at = Http.nowMs(io);
+    client.cancel();
+    reader.join();
+    const latency = Http.nowMs(io) - canceled_at;
+
+    // In order, so the first failure says what actually went wrong rather than
+    // only that the error was not the expected one.
+    try testing.expect(!result.send_failed);
+    try testing.expect(!result.ended_clean);
+    try testing.expect(result.reads >= 1);
+    try testing.expect(result.elapsed_ms >= 40);
+    try testing.expectEqual(seam.Error.Canceled, result.err.?);
+    // DR-018's number, and the reason the shutdown is there at all.
+    try testing.expect(latency <= 100);
+}
+
+test "a stall becomes a timeout rather than a hang" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const server = try TestServer.start(io, .{});
+    defer server.deinit();
+
+    var url_buffer: [64]u8 = undefined;
+    const url = server.url(&url_buffer);
+
+    // Short enough that the test is quick, long enough that the 250 ms watchdog
+    // tick is not the thing being measured.
+    var client: Http = .init(testing.allocator, io, .{ .read_ms = 400 });
+    defer client.deinit();
+
+    var result: DrainResult = .{};
+    drainTimed(&client, url, &result);
+
+    try testing.expect(!result.send_failed);
+    try testing.expectEqual(seam.Error.Timeout, result.err.?);
+    try testing.expect(result.reads >= 1);
+    try testing.expect(result.elapsed_ms >= 400);
+    // A tick of slack on each side; a stall that took two seconds to notice
+    // would pass a bare lower-bound assertion and still be a bug.
+    try testing.expect(result.elapsed_ms <= 1_200);
+}
+
+test "a second turn to the same endpoint reuses the connection" {
+    // Connection reuse is not a micro-optimization here: a fresh TLS handshake
+    // per turn is tens of milliseconds against a 3 ms first-token budget. The
+    // std client pools for us — this test exists to notice if a change to
+    // close() ever stops it, because nothing else would.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const server = try TestServer.start(io, .{ .responses = 2, .go_silent = false });
+    defer server.deinit();
+
+    var url_buffer: [64]u8 = undefined;
+    const url = server.url(&url_buffer);
+
+    // A read timeout, so that a regression which stops reusing the connection
+    // fails on a stall instead of hanging: the second connection would complete
+    // at the TCP level and then wait for a server that is no longer accepting.
+    var client: Http = .init(testing.allocator, io, .{ .read_ms = 1_000 });
+    defer client.deinit();
+
+    var first: DrainResult = .{};
+    var second: DrainResult = .{};
+    try drain(&client, url, &first);
+    try drain(&client, url, &second);
+
+    // This is also what pins closeErasedSelf to request.deinit() rather than a
+    // close: deinit releases the connection to the pool, a close retires it.
+    // Getting that backwards passes every other test in this file.
+    try testing.expectEqual(@as(usize, 1), server.accepted.load(.acquire));
 }
