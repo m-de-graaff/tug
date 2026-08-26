@@ -1,0 +1,6 @@
+{"type":"usage","input_tokens":24,"output_tokens":1,"cache_read_tokens":1200,"cache_creation_tokens":0}
+{"type":"text_delta","text":"A tugboat is rated"}
+{"type":"text_delta","text":" in bollard pull:"}
+{"type":"text_delta","text":" the force it can exert on a line."}
+{"type":"usage","input_tokens":24,"output_tokens":17,"cache_read_tokens":1200,"cache_creation_tokens":0}
+{"type":"stop","reason":"end_turn"}

@@ -11,9 +11,12 @@
 
 const std = @import("std");
 
+pub const anthropic = @import("anthropic.zig");
+pub const anthropic_map = @import("anthropic_map.zig");
 pub const canary = @import("canary.zig");
 pub const fixture = @import("fixture.zig");
 pub const http = @import("transport/http.zig");
+pub const redact = @import("redact.zig");
 pub const sse = @import("sse.zig");
 pub const stream = @import("stream.zig");
 pub const transport = @import("transport.zig");

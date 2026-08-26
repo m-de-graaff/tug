@@ -104,6 +104,12 @@ pub fn build(b: *std.Build) void {
     providers.addAnonymousImport("clean-turn.sse", .{
         .root_source_file = b.path("testdata/fixtures/anthropic/clean-turn.sse"),
     });
+    providers.addAnonymousImport("request-anthropic.json", .{
+        .root_source_file = b.path("testdata/golden/request-anthropic.json"),
+    });
+    providers.addAnonymousImport("clean-turn.ndjson", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/clean-turn.ndjson"),
+    });
 
     const shell = b.addModule("tugshell", .{
         .root_source_file = b.path("src/shell/root.zig"),
