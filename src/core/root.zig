@@ -24,6 +24,7 @@ pub const nearest = @import("nearest.zig");
 pub const scheduler = @import("scheduler.zig");
 pub const provider = @import("provider.zig");
 pub const mock = @import("mock.zig");
+pub const models = @import("models.zig");
 pub const Bus = bus.Bus;
 pub const Scheduler = scheduler.Scheduler;
 pub const Conversation = conversation.Conversation;
