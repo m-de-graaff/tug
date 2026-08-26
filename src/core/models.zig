@@ -8,6 +8,23 @@
 //! Freestanding, like everything in `tugcore`. No allocator: overrides are
 //! written into a fixed table the caller owns, which is the same arrangement the
 //! config already uses for keybindings.
+//!
+//! **Two things a flat price cannot say**, both found by reading how `pi` prices
+//! the same providers, and both deferred rather than built:
+//!
+//! 1. **Tiered input pricing.** Some providers charge more per token above a
+//!    context threshold — pi keys a rate table on "input tokens above N". A
+//!    conversation that crosses the threshold is under-reported here, and
+//!    under-reported is the wrong direction to be wrong in.
+//! 2. **Cache writes with a TTL.** Anthropic's one-hour cache writes cost twice
+//!    base input; `Price` has one `cache_write_per_mtok` and `Usage` has one
+//!    `cache_creation_tokens`, so a long-TTL write is priced as a short one.
+//!
+//! Neither is built, because v0.2's scope guard says no per-model parameter
+//! schemas and because both need a `Usage` field that does not exist yet — which
+//! makes them wire-format changes rather than table changes. The override path
+//! is the honest interim answer: a user on tiered pricing pins the rate they
+//! actually pay. Revisit when `Usage` next changes shape, which is v0.4.
 
 const std = @import("std");
 
