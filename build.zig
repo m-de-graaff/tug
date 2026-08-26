@@ -83,6 +83,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "tugproto", .module = proto },
+            // The legal direction. `tugcore` defines the `Provider` seam and
+            // must never import this module back — it compiles for a target
+            // with no sockets at all, and `zig build wasm-check` is what says
+            // so if anyone tries.
+            .{ .name = "tugcore", .module = tugcore },
         },
     });
 
