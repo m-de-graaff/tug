@@ -1,0 +1,10 @@
+endpoint = "https://api.openai.com/v1/chat/completions"
+model = "gpt-5-turbo-ultra"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; response side only"
+note = """
+A model name that does not exist. The requirement is that the name the user got
+wrong survives into the message they see — an error that says "404" and stops
+has made the user go and find out what tug already knew.
+"""

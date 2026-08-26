@@ -130,6 +130,27 @@ pub fn build(b: *std.Build) void {
     providers.addAnonymousImport("openai-usage-absent.ndjson", .{
         .root_source_file = b.path("testdata/fixtures/openai/usage-absent.ndjson"),
     });
+    providers.addAnonymousImport("openai-usage-absent.head", .{
+        .root_source_file = b.path("testdata/fixtures/openai/usage-absent.head"),
+    });
+    providers.addAnonymousImport("error-401.head", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/error-401.head"),
+    });
+    providers.addAnonymousImport("error-401.sse", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/error-401.sse"),
+    });
+    providers.addAnonymousImport("error-401.ndjson", .{
+        .root_source_file = b.path("testdata/fixtures/anthropic/error-401.ndjson"),
+    });
+    providers.addAnonymousImport("openai-error-404-model.head", .{
+        .root_source_file = b.path("testdata/fixtures/openai/error-404-model.head"),
+    });
+    providers.addAnonymousImport("openai-error-404-model.sse", .{
+        .root_source_file = b.path("testdata/fixtures/openai/error-404-model.sse"),
+    });
+    providers.addAnonymousImport("openai-error-404-model.ndjson", .{
+        .root_source_file = b.path("testdata/fixtures/openai/error-404-model.ndjson"),
+    });
 
     const shell = b.addModule("tugshell", .{
         .root_source_file = b.path("src/shell/root.zig"),
@@ -290,6 +311,20 @@ pub fn build(b: *std.Build) void {
         });
         fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
     }
+
+    // --- replay ------------------------------------------------------------
+
+    // The roadmap's exit criterion, as a job name: every recorded fixture,
+    // replayed through the whole provider stack, compared byte for byte against
+    // the `StreamEvent` ndjson it is supposed to produce — at five chunk sizes,
+    // because a read boundary must be invisible above the transport seam.
+    const replay_step = b.step("replay", "Replay every fixture through the provider stack");
+    const replay_tests = b.addTest(.{
+        .name = "tugproviders-replay",
+        .root_module = providers,
+        .filters = &.{"replay:"},
+    });
+    replay_step.dependOn(&b.addRunArtifact(replay_tests).step);
 
     // --- size --------------------------------------------------------------
 

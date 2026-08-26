@@ -292,6 +292,20 @@ jobs:
             testdata/fixtures/anthropic/clean-turn.sse \
             testdata/golden/sse-dump-clean-turn.txt
 
+  fixture-replay:
+    name: fixtures replay byte for byte
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The roadmap's exit criterion, verbatim, as a job name: every recorded
+      # response through the whole provider stack, compared byte for byte
+      # against the StreamEvent ndjson it must produce - at five chunk sizes,
+      # because a read boundary has to be invisible above the transport seam.
+      - run: sh scripts/offline.sh zig build replay --summary all
+
   valgrind:
     name: memcheck (scoped)
     runs-on: ubuntu-24.04
@@ -331,6 +345,7 @@ jobs:
         command-session,
         soak-session,
         sse-dump,
+        fixture-replay,
         valgrind,
       ]
     if: always()

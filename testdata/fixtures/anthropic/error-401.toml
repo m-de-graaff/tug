@@ -1,0 +1,16 @@
+endpoint = "https://api.anthropic.com/v1/messages"
+model = "claude-sonnet-4-5"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; the body names the header, never its value"
+note = """
+A wrong key. The point of the fixture is the *routing*: a 401 body is JSON and
+must never reach the SSE parser, which would frame it happily and then report a
+decode error about a message that was never a message. The user would be told
+their stream was malformed when in fact their key was.
+
+The `.sse` extension is a lie here and kept on purpose — the corpus is one shape
+per case, and a second extension would be a second code path in the replay job
+for no gain. The `.head` says `application/json`, which is what the stack
+branches on.
+"""
