@@ -20,6 +20,7 @@ pub const openai = @import("openai.zig");
 pub const preset = @import("preset.zig");
 pub const redact = @import("redact.zig");
 pub const replay_test = @import("replay_test.zig");
+pub const retry = @import("retry.zig");
 pub const sse = @import("sse.zig");
 pub const stream = @import("stream.zig");
 pub const taxonomy = @import("taxonomy.zig");
