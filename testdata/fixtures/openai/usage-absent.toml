@@ -1,0 +1,13 @@
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+model = "llama3.1"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; body written by hand, response side only"
+note = """
+The same turn from a compat server that does not honour `stream_options`, which
+several of them do not: the usage chunk is simply absent.
+
+The requirement this fixture exists for: absence degrades the usage line and
+never the stream. The `.ndjson` beside it has no usage line and still has its
+text and its stop.
+"""

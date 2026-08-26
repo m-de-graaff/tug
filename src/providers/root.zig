@@ -16,6 +16,7 @@ pub const anthropic_map = @import("anthropic_map.zig");
 pub const canary = @import("canary.zig");
 pub const fixture = @import("fixture.zig");
 pub const http = @import("transport/http.zig");
+pub const openai = @import("openai.zig");
 pub const redact = @import("redact.zig");
 pub const sse = @import("sse.zig");
 pub const stream = @import("stream.zig");

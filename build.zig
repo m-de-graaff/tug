@@ -110,6 +110,26 @@ pub fn build(b: *std.Build) void {
     providers.addAnonymousImport("clean-turn.ndjson", .{
         .root_source_file = b.path("testdata/fixtures/anthropic/clean-turn.ndjson"),
     });
+    providers.addAnonymousImport("request-openai.json", .{
+        .root_source_file = b.path("testdata/golden/request-openai.json"),
+    });
+    // Prefixed by shape, because `clean-turn` is a case name that exists in
+    // both directories and an import name is flat.
+    providers.addAnonymousImport("openai-clean-turn.head", .{
+        .root_source_file = b.path("testdata/fixtures/openai/clean-turn.head"),
+    });
+    providers.addAnonymousImport("openai-clean-turn.sse", .{
+        .root_source_file = b.path("testdata/fixtures/openai/clean-turn.sse"),
+    });
+    providers.addAnonymousImport("openai-clean-turn.ndjson", .{
+        .root_source_file = b.path("testdata/fixtures/openai/clean-turn.ndjson"),
+    });
+    providers.addAnonymousImport("openai-usage-absent.sse", .{
+        .root_source_file = b.path("testdata/fixtures/openai/usage-absent.sse"),
+    });
+    providers.addAnonymousImport("openai-usage-absent.ndjson", .{
+        .root_source_file = b.path("testdata/fixtures/openai/usage-absent.ndjson"),
+    });
 
     const shell = b.addModule("tugshell", .{
         .root_source_file = b.path("src/shell/root.zig"),

@@ -1,0 +1,23 @@
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+model = "llama3.1"
+capture = "handwritten"
+recorder = "handwritten"
+sanitized = "no key material; body written by hand, response side only"
+note = """
+The chat-completions streaming shape, and the three traps in it that break a
+naive mapper.
+
+One: there is no `event:` field at all. Every chunk is an unnamed `data:` event,
+so a mapper that switches on the event name sees nothing and does nothing.
+
+Two: `data: [DONE]` is a sentinel, not JSON. Handing it to a JSON parser
+produces a decode error on the last event of every successful stream.
+
+Three: the final usage chunk has an **empty** `choices` array. A mapper reading
+`choices[0]` unconditionally crashes on the one event that carries the numbers
+the usage line is made of.
+
+Written by hand rather than recorded, so it proves the mapper handles the shape
+and proves nothing about what any particular server currently sends. Phase 9
+replaces the body with a real capture and this line with a date.
+"""

@@ -1,0 +1,1 @@
+{"model":"llama3.1","messages":[{"role":"system","content":"be terse"},{"role":"user","content":"what is a bollard"},{"role":"assistant","content":"a fixed post"},{"role":"user","content":"and a bollard pull"}],"max_tokens":1024,"stream":true,"stream_options":{"include_usage":true}}
